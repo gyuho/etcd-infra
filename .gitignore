@@ -1,0 +1,35 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+**/coverage.out
+**/cover.out
+
+.idea
+.DS_Store
+.tmp
+.logs
+.codegraph
+.serena
+.claude
+.gemini
+.local
+*.log
+junit_*.xml
+
+# Build output
+/bin/
+/out/
+/dist/
+/.release-work/
+
+# Compiled binary from cmd/
+/etcd-infra

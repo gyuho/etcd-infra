@@ -1,0 +1,263 @@
+version: "2"
+
+run:
+  concurrency: 4
+  timeout: 15m
+  tests: true
+  modules-download-mode: readonly
+  relative-path-mode: cfg
+
+linters:
+  default: none
+  exclusions:
+    rules:
+      # contextcheck disabled for test and integration code: these are integration tests,
+      # test commands, conformance/stress test scenarios, and example test applications
+      # where strict context propagation is less critical than in production code.
+      # The test functions often use background contexts or omit context parameters
+      # for simplicity in test scenarios.
+      - path: ^test/
+        linters:
+          - contextcheck
+      - path: ^cmd/k8x/etcd/test/
+        linters:
+          - contextcheck
+      - path: ^internal/etcd/conformance/
+        linters:
+          - contextcheck
+      - path: ^internal/etcd/stress/
+        linters:
+          - contextcheck
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    # cyclop disabled: 83 violations from cyclomatic complexity in cluster state
+    # machines and integration test logic. Similar to gocyclo which was disabled.
+    # Provisioning and test setup inherently requires multiple branches for
+    # different paths (control plane, nodes, networking, etc).
+    # - cyclop
+    - decorder
+    - depguard
+    - dogsled
+    # dupl disabled: 22 violations from auto-generated test scenario files that
+    # have duplicate code patterns (id_run_*.go). These duplications are inherent
+    # to the generated scenario structure and would require refactoring the code
+    # generation template, not individual files.
+    # - dupl
+    - durationcheck
+    - embeddedstructfieldcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - forcetypeassert
+    - funcorder
+    # funlen disabled: 54 violations from functions exceeding 100 lines.
+    # Complex domain logic (cluster creation, integration testing) requires
+    # detailed sequential operations that are difficult to extract into helpers
+    # without obscuring intent. Lines are meaningful and grouped logically.
+    # - funlen
+    - ginkgolinter
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - gochecksumtype
+    # gocognit disabled: 74 violations from high cognitive complexity functions.
+    # Similar to funlen, integration test setup and cluster provisioning logic
+    # requires sequential state management steps that are difficult to factor
+    # without reducing clarity. Tests prioritize correctness and maintainability.
+    # - gocognit
+    - goconst
+    - gocritic
+    # gocyclo disabled: 20 violations from high cyclomatic complexity functions.
+    # Related to gocognit - state machine logic in cluster setup requires multiple
+    # conditional branches for different paths (control plane, nodes, networking).
+    # - gocyclo
+    - godoclint
+    - godot
+    - goheader
+    - goprintffuncname
+    - gosec
+    - gosmopolitan
+    - govet
+    - grouper
+    - iface
+    - importas
+    - inamedparam
+    - ineffassign
+    # interfacebloat disabled: 1 violation from interface design pattern.
+    # StressRunner mirrors conformance Runner interface and adds stress-specific methods;
+    # breaking this into separate interfaces would reduce API clarity and increase complexity.
+    # - interfacebloat
+    - intrange
+    - iotamixing
+    # ireturn disabled: 11 violations from factory functions (New, NewWith*, etc) and
+    # getter methods that intentionally return interfaces for dependency injection,
+    # testability, and abstraction layers - valid Go design patterns.
+    # - ireturn
+    - loggercheck
+    # maintidx disabled: 17 violations from auto-generated etcd conformance test
+    # scenarios (15), integration test setup code (2), and CLI command handlers (1).
+    # These functions have inherent complexity due to comprehensive test coverage
+    # and multi-component coordination rather than maintainability issues.
+    # - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - modernize
+    - musttag
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnesserr
+    - noctx
+    # nolintlint disabled: 114 violations from nolint directive usage in generated files.
+    # The generated test scenarios intentionally use //nolint:govet directives to suppress
+    # expected variable shadowing patterns that are part of the code generation template.
+    # - nolintlint
+    - nonamedreturns
+    - nosprintfhostport
+    - paralleltest
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
+    # revive disabled: 335 violations mostly in auto-generated test scenario files
+    # (id_run_*.go with ALL_CAPS function names and var-naming issues from code generation)
+    # and non-critical style checks (package comments, indent-error-flow) that would require
+    # significant refactoring of generated code
+    # - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    - tagliatelle
+    - testableexamples
+    - testifylint
+    - tparallel
+    - unconvert
+    - unparam
+    - unqueryvet
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+    - wrapcheck
+    - zerologlint
+
+  settings:
+    # revive settings disabled along with linter (see comment in enable section)
+    misspell:
+      locale: US
+    govet:
+      enable:
+        - shadow
+    staticcheck:
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1020
+        - -QF1008
+    gosec:
+      excludes:
+        - G104
+        - G304
+        - G305
+      severity: "medium"
+      confidence: "medium"
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - commentFormatting
+        - hugeParam
+    # gocyclo, cyclop, gocognit, funlen settings disabled along with linters
+    # (see comments in enable section)
+    goconst:
+      min-len: 2
+      min-occurrences: 2
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    nakedret:
+      max-func-lines: 0
+    nestif:
+      min-complexity: 4
+    perfsprint:
+      strconcat: false
+    makezero:
+      always: false
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $gostd
+            - git.tbd/k8x
+            - github.com/spf13/cobra
+            - github.com/spf13/pflag
+            - github.com/stretchr/testify
+            - go.uber.org/zap
+            - k8s.io
+            - sigs.k8s.io
+            - go.etcd.io
+            - tailscale.com
+            - github.com/fatih/color
+            - github.com/nsf/termbox-go
+            - github.com/mattn/go-colorable
+            - github.com/mattn/go-isatty
+            - github.com/olekukonko/tablewriter
+            - github.com/Sirupsen/logrus
+            - github.com/sirupsen/logrus
+            - github.com/lima-vm/lima
+            - github.com/lima-vm/sshocker
+            - github.com/briandowns/spinner
+            - al.essio.dev/pkg/shellescape
+            - github.com/Masterminds/semver/v3
+            - github.com/coreos/go-semver
+            - github.com/dustin/go-humanize
+            - helm.sh/helm/v3
+            - golang.org/x/net
+            - golang.org/x/time
+            - google.golang.org/grpc
+            - google.golang.org/protobuf
+            - github.com/jonboulle/clockwork
+            - github.com/pkg/errors
+            - google.golang.org/genproto/googleapis/rpc/errdetails
+            - github.com/nxadm/tail
+            - github.com/google/uuid
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra-rules: true
+      module-path: git.tbd/k8x
+    goimports:
+      local-prefixes:
+        - git.tbd/k8x
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
