@@ -15,6 +15,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	etcdclient "git.tbd/etcd-infra/internal/etcd/client"
+	"git.tbd/etcd-infra/pkg/providers/compute"
+	localprovider "git.tbd/etcd-infra/pkg/providers/local"
 )
 
 const (
@@ -28,12 +30,14 @@ var clusterNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
 
 func runLocal(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: etcd-infra local <up|down|status>")
+		return errors.New("usage: etcd-infra local <up|replace|down|status>")
 	}
 
 	switch args[0] {
 	case "up":
 		return runLocalUp(ctx, args[1:])
+	case "replace":
+		return runLocalReplace(ctx, args[1:])
 	case "down":
 		return runLocalDown(ctx, args[1:])
 	case "status":
@@ -65,7 +69,7 @@ func runLocalUp(ctx context.Context, args []string) error {
 		return err
 	}
 	members := localMembers(*name, *memberCount, *port)
-	network := localNetworkName(*name)
+	network := localprovider.NetworkName(*name)
 	if output, err := exec.CommandContext(ctx, runtime, "network", "create", network).CombinedOutput(); err != nil {
 		return fmt.Errorf("create %s network %s: %w: %s", runtime, network, err, strings.TrimSpace(string(output)))
 	}
@@ -75,20 +79,23 @@ func runLocalUp(ctx context.Context, args []string) error {
 		defer cancel()
 		_ = removeLocalCluster(cleanupCtx, runtime, *name)
 	}
+	manager := localprovider.New(runtime, *name, 0)
 	for i, member := range members {
-		output, runErr := exec.CommandContext(
-			ctx,
-			runtime,
-			containerRunArgs(member, members, *name, *port+i, resolvedVersion)...,
-		).CombinedOutput()
-		if runErr != nil {
+		command := append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(member, members, *name, localprovider.DataDir)...)
+		_, createErr := manager.Create(ctx, compute.NewCreateRequest(
+			compute.WithName(member.Name),
+			compute.WithImage(etcdImage+":"+releaseTag(resolvedVersion)),
+			compute.WithPortMappings([]compute.PortMapping{{ContainerPort: 2379, HostPort: *port + i, HostIP: "127.0.0.1"}}),
+			compute.WithProviderConfig(localprovider.CreateConfig{Command: command}),
+		))
+		if createErr != nil {
 			cleanup()
-			return fmt.Errorf("start local etcd member %s: %w: %s", member.Name, runErr, strings.TrimSpace(string(output)))
+			return fmt.Errorf("start local etcd member %s: %w", member.Name, createErr)
 		}
 	}
 
 	endpoints := memberClientURLs(members)
-	cli, err := clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: 5 * time.Second})
+	cli, err := etcdclient.New(clientv3.Config{Endpoints: endpoints, DialTimeout: 5 * time.Second})
 	if err != nil {
 		cleanup()
 		return fmt.Errorf("create etcd client: %w", err)
@@ -151,7 +158,7 @@ func runLocalStatus(ctx context.Context, args []string) error {
 		output, err := exec.CommandContext(
 			ctx,
 			runtime, "ps", "--all",
-			"--filter", localClusterFilter(*name),
+			"--filter", localprovider.ClusterFilter(*name),
 			"--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}",
 		).CombinedOutput()
 		if err != nil {
@@ -215,52 +222,40 @@ func memberClientURLs(members []clusterMember) []string {
 	return endpoints
 }
 
-func containerRunArgs(member clusterMember, members []clusterMember, cluster string, port int, version string) []string {
-	args := []string{
-		"run", "--detach", "--rm",
-		"--name", member.Name,
-		"--label", localClusterLabel(cluster),
-		"--network", localNetworkName(cluster),
-		"--publish", "127.0.0.1:" + strconv.Itoa(port) + ":2379",
-		etcdImage + ":" + releaseTag(version),
-		"/usr/local/bin/etcd",
-	}
-	return append(args, etcdServerArgs(member, members, cluster, "/etcd-data")...)
-}
-
-func localNetworkName(cluster string) string {
-	return cluster + "-net"
-}
-
-func localClusterLabel(cluster string) string {
-	return "etcd-infra.cluster=" + cluster
-}
-
-func localClusterFilter(cluster string) string {
-	return "label=" + localClusterLabel(cluster)
-}
-
 func removeLocalCluster(ctx context.Context, runtime, cluster string) error {
+	var cleanupErr error
 	output, err := exec.CommandContext(
 		ctx,
-		runtime, "ps", "--all", "--quiet", "--filter", localClusterFilter(cluster),
+		runtime, "ps", "--all", "--quiet", "--filter", localprovider.ClusterFilter(cluster),
 	).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("list local etcd containers: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	if ids := strings.Fields(string(output)); len(ids) > 0 {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("list local etcd containers: %w: %s", err, strings.TrimSpace(string(output))))
+	} else if ids := strings.Fields(string(output)); len(ids) > 0 {
 		rmArgs := append([]string{"rm", "--force"}, ids...)
 		if rmOutput, rmErr := exec.CommandContext(ctx, runtime, rmArgs...).CombinedOutput(); rmErr != nil {
-			return fmt.Errorf("remove local etcd containers: %w: %s", rmErr, strings.TrimSpace(string(rmOutput)))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove local etcd containers: %w: %s", rmErr, strings.TrimSpace(string(rmOutput))))
 		}
 	}
 
-	network := localNetworkName(cluster)
+	volumeOutput, volumeErr := exec.CommandContext(
+		ctx,
+		runtime, "volume", "ls", "--quiet", "--filter", localprovider.ClusterFilter(cluster),
+	).CombinedOutput()
+	if volumeErr != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("list local etcd volumes: %w: %s", volumeErr, strings.TrimSpace(string(volumeOutput))))
+	} else if volumes := strings.Fields(string(volumeOutput)); len(volumes) > 0 {
+		rmArgs := append([]string{"volume", "rm", "--force"}, volumes...)
+		if rmOutput, rmErr := exec.CommandContext(ctx, runtime, rmArgs...).CombinedOutput(); rmErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove local etcd volumes: %w: %s", rmErr, strings.TrimSpace(string(rmOutput))))
+		}
+	}
+
+	network := localprovider.NetworkName(cluster)
 	networkOutput, networkErr := exec.CommandContext(ctx, runtime, "network", "rm", network).CombinedOutput()
 	if networkErr != nil && !strings.Contains(strings.ToLower(string(networkOutput)), "not found") {
-		return fmt.Errorf("remove %s network %s: %w: %s", runtime, network, networkErr, strings.TrimSpace(string(networkOutput)))
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s network %s: %w: %s", runtime, network, networkErr, strings.TrimSpace(string(networkOutput))))
 	}
-	return nil
+	return cleanupErr
 }
 
 func localClusterLogs(runtime, cluster string) string {
@@ -269,7 +264,7 @@ func localClusterLogs(runtime, cluster string) string {
 
 	output, err := exec.CommandContext(
 		ctx,
-		runtime, "ps", "--all", "--quiet", "--filter", localClusterFilter(cluster),
+		runtime, "ps", "--all", "--quiet", "--filter", localprovider.ClusterFilter(cluster),
 	).CombinedOutput()
 	if err != nil {
 		return "unable to list container logs: " + err.Error()

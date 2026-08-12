@@ -10,19 +10,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	localprovider "git.tbd/etcd-infra/pkg/providers/local"
 )
 
-func TestLocalThreeMemberContainerArgs(t *testing.T) {
+func TestLocalThreeMemberTopology(t *testing.T) {
 	t.Parallel()
 
 	members := localMembers("test-etcd", 3, 12379)
 	require.Len(t, members, 3)
 	assert.Equal(t, "test-etcd-1=http://test-etcd-1:2380,test-etcd-2=http://test-etcd-2:2380,test-etcd-3=http://test-etcd-3:2380", initialCluster(members))
 
-	args := containerRunArgs(members[1], members, "test-etcd", 12380, "3.7.1")
-	assert.True(t, slices.Contains(args, "127.0.0.1:12380:2379"))
-	assert.True(t, slices.Contains(args, "gcr.io/etcd-development/etcd:v3.7.1"))
-	assert.True(t, slices.Contains(args, "etcd-infra.cluster=test-etcd"))
+	args := etcdServerArgs(members[1], members, "test-etcd", localprovider.DataDir)
+	assert.True(t, slices.Contains(args, localprovider.DataDir))
 	assert.True(t, slices.Contains(args, "http://test-etcd-2:2380"))
 	assert.Equal(t, 1, countArg(args, "--initial-cluster-token"))
 }
@@ -55,7 +55,7 @@ func TestValidateLocalOptions(t *testing.T) {
 func TestLocalClusterFilter(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "label=etcd-infra.cluster=test", localClusterFilter("test"))
+	require.Equal(t, "label=etcd-infra.cluster=test", localprovider.ClusterFilter("test"))
 }
 
 func countArg(args []string, target string) int {

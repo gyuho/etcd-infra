@@ -84,6 +84,12 @@ fi
 if [[ " ${GOFLAGS:-} " != *" -buildvcs=false "* ]]; then
     export GOFLAGS="${GOFLAGS:+${GOFLAGS} }-buildvcs=false"
 fi
+client_mode="${ETCD_INFRA_CLIENT:-official}"
+case "$client_mode" in
+    official) ;;
+    custom) export GOFLAGS="${GOFLAGS} -modfile=${PROJECT_ROOT}/go.custom.mod -tags=etcd_infra_custom_client" ;;
+    *) echo "ETCD_INFRA_CLIENT must be official or custom" >&2; exit 2 ;;
+esac
 
 extra_go_test_flags=()
 if [[ -n "${GO_TEST_FLAGS:-}" ]]; then
@@ -178,5 +184,13 @@ run_unit_tests() {
 }
 
 run_unit_tests
+
+if [[ "$client_mode" == "custom" && ${#requested_packages[@]} -eq 0 ]]; then
+    log_step "Testing copied etcd client"
+    (
+        cd "$PROJECT_ROOT/client/v3"
+        GOFLAGS="-buildvcs=false" go test -race ./...
+    )
+fi
 
 echo "All unit tests passed successfully."

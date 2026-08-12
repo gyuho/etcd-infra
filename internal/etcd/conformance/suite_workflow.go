@@ -19,6 +19,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"gopkg.in/yaml.v3"
 
+	etcdclient "git.tbd/etcd-infra/internal/etcd/client"
 	"git.tbd/etcd-infra/internal/etcd/conformance/scenarios"
 	logutil "git.tbd/etcd-infra/pkg/log"
 	"git.tbd/etcd-infra/pkg/randutil"
@@ -743,7 +744,7 @@ func (cfg *Config) createClientWithURLs(urls []string, opts ...scenarios.OpOptio
 	options := &scenarios.Op{}
 	options.ApplyOpts(opts)
 
-	logutil.S().Infow("creating client", "urls", urls)
+	logutil.S().Infow("creating client", "urls", urls, "client", etcdclient.Mode)
 
 	ti := &transport.TLSInfo{
 		Logger:        logutil.L(),
@@ -768,7 +769,7 @@ func (cfg *Config) createClientWithURLs(urls []string, opts ...scenarios.OpOptio
 		clientCfg.MaxCallRecvMsgSize = options.MaxCallRecvMsgSize
 	}
 
-	client, err := clientv3.New(clientCfg)
+	client, err := etcdclient.New(clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create client: %w", err)
 	}

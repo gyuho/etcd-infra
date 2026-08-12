@@ -21,6 +21,8 @@
 .serena
 .claude
 .gemini
+.nicc
+.codex
 .local
 *.log
 junit_*.xml
