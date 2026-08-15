@@ -75,7 +75,9 @@ The built-in local container provider uses the following `Op` fields:
 - `Name` for the container and persistent-volume names
 - `Image` for the container image
 - one `PortMappings` entry for the etcd client port (`2379/tcp`)
-- `ProviderConfig` with `local.CreateConfig.Command` for the container command
+- `ProviderConfig` with `local.CreateConfig` for the container command, optional
+  environment variables (`Env`), and one optional auxiliary published port
+  (`AuxPortMapping`, for example a gofail HTTP endpoint)
 
 Other fields are ignored by this provider. Its cluster-scoped manager supplies
 the network, ownership label, and persistent data-volume layout.

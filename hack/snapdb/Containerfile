@@ -1,0 +1,4 @@
+ARG BASE_IMAGE=gcr.io/etcd-development/etcd:v3.7.1
+FROM ${BASE_IMAGE}
+# Replace the released etcd with a gofail-enabled build from a fork commit.
+COPY --chmod=0755 etcd /usr/local/bin/etcd

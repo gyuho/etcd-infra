@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,11 @@ import (
 // CreateConfig contains the container-specific fields for Create.
 type CreateConfig struct {
 	Command []string
+	// Env carries KEY=VALUE environment variables into the container.
+	Env []string
+	// AuxPortMapping optionally publishes one extra container port (for
+	// example a gofail HTTP endpoint) alongside the etcd client port.
+	AuxPortMapping *compute.PortMapping
 }
 
 // Create starts a container on the cluster network with a persistent data volume.
@@ -39,6 +45,9 @@ func (m *Manager) Create(ctx context.Context, req compute.CreateRequest) (comput
 	}
 	port, err := clientPortMapping(req.Op.PortMappings)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCreateConfig(cfg); err != nil {
 		return nil, err
 	}
 
@@ -162,7 +171,11 @@ func (m *Manager) ReplaceMachine(ctx context.Context, req compute.ReplaceRequest
 			}
 		}
 	}
-	recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	// The recovery budget tolerates container runtimes that stall `run` under
+	// sustained load (observed: Podman VMs on macOS intermittently exceeding
+	// 30s during long E2E runs); a slow relaunch is infrastructure noise, not
+	// a replacement failure.
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
 	defer cancelRecovery()
 	recoveryErr := m.restoreContainer(recoveryCtx, before)
 	if recoveryErr != nil {
@@ -194,9 +207,9 @@ func (m *Manager) restoreContainer(ctx context.Context, before replacementSpec) 
 				// A relaunched etcd that already exited, or a partial creation
 				// the runtime left behind. Remove it so the relaunch can reuse
 				// the name.
-				output, err := exec.CommandContext(ctx, m.runtime, "rm", "--force", before.name).CombinedOutput()
+				output, err := runWithAttemptTimeout(ctx, m.runtime, "rm", "--force", before.name)
 				if err != nil {
-					lastErr = fmt.Errorf("local: remove stopped container %s: %w: %s", before.name, err, strings.TrimSpace(string(output)))
+					lastErr = fmt.Errorf("local: remove stopped container %s: %w: %s", before.name, err, output)
 				} else {
 					lastErr = fmt.Errorf("local: container %s stopped (%s); relaunching", before.name, inspected.State.Status)
 				}
@@ -213,18 +226,20 @@ func (m *Manager) restoreContainer(ctx context.Context, before replacementSpec) 
 			if after.containerID == before.containerID {
 				return fmt.Errorf("local: container %s was not replaced", before.name)
 			}
-			if after.privateIP != before.privateIP || after.volume != before.volume {
+			if after.privateIP != before.privateIP || after.volume != before.volume ||
+				after.auxPublish != before.auxPublish || !slices.Equal(after.env, before.env) {
 				// The running container violates the replacement identity and
 				// must not serve the member. It carries this cluster's label
 				// (ownedContainer passed), so remove it and let the next tick
 				// relaunch with the pinned identity inside the budget.
 				mismatchErr := fmt.Errorf(
-					"local: container %s replacement identity changed: ip %s -> %s, volume %s -> %s",
+					"local: container %s replacement identity changed: ip %s -> %s, volume %s -> %s, aux port %q -> %q, env %v -> %v",
 					before.name, before.privateIP, after.privateIP, before.volume, after.volume,
+					before.auxPublish, after.auxPublish, before.env, after.env,
 				)
-				output, err := exec.CommandContext(ctx, m.runtime, "rm", "--force", before.name).CombinedOutput()
+				output, err := runWithAttemptTimeout(ctx, m.runtime, "rm", "--force", before.name)
 				if err != nil {
-					return fmt.Errorf("%w; remove mismatched container: %v: %s", mismatchErr, err, strings.TrimSpace(string(output)))
+					return fmt.Errorf("%w; remove mismatched container: %v: %s", mismatchErr, err, output)
 				}
 				lastErr = mismatchErr
 				break
@@ -232,9 +247,9 @@ func (m *Manager) restoreContainer(ctx context.Context, before replacementSpec) 
 			return nil
 		default:
 			lastErr = inspectErr
-			output, runErr := exec.CommandContext(ctx, m.runtime, before.runArgs()...).CombinedOutput()
+			output, runErr := runWithAttemptTimeout(ctx, m.runtime, before.runArgs()...)
 			if runErr != nil {
-				lastErr = fmt.Errorf("local: relaunch container %s with preserved volume %s: %w: %s", before.name, before.volume, runErr, strings.TrimSpace(string(output)))
+				lastErr = fmt.Errorf("local: relaunch container %s with preserved volume %s: %w: %s", before.name, before.volume, runErr, output)
 			}
 		}
 		select {
@@ -245,12 +260,27 @@ func (m *Manager) restoreContainer(ctx context.Context, before replacementSpec) 
 	}
 }
 
+// runWithAttemptTimeout runs one container-runtime command with its own
+// attempt budget. A container runtime can occasionally wedge a single command
+// (observed: Podman on macOS hanging `run` for minutes while the rest of the
+// VM stays healthy); without a per-attempt budget one wedged command consumes
+// the whole recovery budget and fails a replacement that an immediate retry
+// would complete.
+func runWithAttemptTimeout(ctx context.Context, runtime string, args ...string) (string, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(attemptCtx, runtime, args...).CombinedOutput()
+	return strings.TrimSpace(string(output)), err
+}
+
 type replacementSpec struct {
 	containerID string
 	name        string
 	cluster     string
 	image       string
 	command     []string
+	env         []string
+	auxPublish  string
 	network     string
 	privateIP   string
 	hostIP      string
@@ -268,6 +298,24 @@ func replacementSpecFromInspect(inspected containerInspect, cluster string) (rep
 	bindings := inspected.HostConfig.PortBindings["2379/tcp"]
 	if len(bindings) != 1 || bindings[0].HostPort == "" {
 		return replacementSpec{}, fmt.Errorf("local: container %s has no single client port binding", name)
+	}
+	auxPublish := ""
+	for portKey, portBindings := range inspected.HostConfig.PortBindings {
+		if portKey == "2379/tcp" {
+			continue
+		}
+		containerPort, found := strings.CutSuffix(portKey, "/tcp")
+		if !found || len(portBindings) != 1 || portBindings[0].HostPort == "" {
+			return replacementSpec{}, fmt.Errorf("local: container %s has invalid auxiliary port binding %s", name, portKey)
+		}
+		if auxPublish != "" {
+			return replacementSpec{}, fmt.Errorf("local: container %s has more than one auxiliary port binding", name)
+		}
+		hostIP := portBindings[0].HostIP
+		if hostIP == "" {
+			hostIP = "127.0.0.1"
+		}
+		auxPublish = hostIP + ":" + portBindings[0].HostPort + ":" + containerPort
 	}
 	volume := ""
 	for _, mount := range inspected.Mounts {
@@ -288,6 +336,8 @@ func replacementSpecFromInspect(inspected containerInspect, cluster string) (rep
 		cluster:     cluster,
 		image:       inspected.Config.Image,
 		command:     inspected.Config.Cmd,
+		env:         inspected.Config.Env,
+		auxPublish:  auxPublish,
 		network:     networkName,
 		privateIP:   network.IPAddress,
 		hostIP:      bindings[0].HostIP,
@@ -310,11 +360,38 @@ func clientPortMapping(mappings []compute.PortMapping) (compute.PortMapping, err
 	return mapping, nil
 }
 
-func createRunArgs(cluster, name, image, volume string, port compute.PortMapping, cfg CreateConfig) []string {
-	hostIP := port.HostIP
+func validateCreateConfig(cfg CreateConfig) error {
+	for _, env := range cfg.Env {
+		key, _, found := strings.Cut(env, "=")
+		if !found || key == "" {
+			return fmt.Errorf("local: invalid environment entry %q", env)
+		}
+	}
+	if cfg.AuxPortMapping == nil {
+		return nil
+	}
+	aux := *cfg.AuxPortMapping
+	if aux.ContainerPort < 1 || aux.ContainerPort > 65535 || aux.ContainerPort == 2379 {
+		return fmt.Errorf("local: invalid auxiliary container port %d", aux.ContainerPort)
+	}
+	if aux.HostPort < 1 || aux.HostPort > 65535 {
+		return fmt.Errorf("local: invalid auxiliary host port %d", aux.HostPort)
+	}
+	if aux.Protocol != "" && aux.Protocol != "tcp" {
+		return errors.New("local: auxiliary port mapping must use tcp")
+	}
+	return nil
+}
+
+func publishArg(mapping compute.PortMapping, hostPort int) string {
+	hostIP := mapping.HostIP
 	if hostIP == "" {
 		hostIP = "127.0.0.1"
 	}
+	return hostIP + ":" + strconv.Itoa(hostPort) + ":" + strconv.Itoa(mapping.ContainerPort)
+}
+
+func createRunArgs(cluster, name, image, volume string, port compute.PortMapping, cfg CreateConfig) []string {
 	// No --rm: Stop/Start are part of the provider contract, and an
 	// auto-removing container would make Stop delete the machine. Removal is
 	// always explicit through Delete or cluster cleanup.
@@ -323,10 +400,18 @@ func createRunArgs(cluster, name, image, volume string, port compute.PortMapping
 		"--name", name,
 		"--label", clusterLabel(cluster),
 		"--network", NetworkName(cluster),
-		"--publish", hostIP + ":" + strconv.Itoa(port.HostPort) + ":2379",
-		"--volume", volume + ":" + DataDir,
-		image,
+		"--publish", publishArg(port, port.HostPort),
 	}
+	if cfg.AuxPortMapping != nil {
+		args = append(args, "--publish", publishArg(*cfg.AuxPortMapping, cfg.AuxPortMapping.HostPort))
+	}
+	for _, env := range cfg.Env {
+		args = append(args, "--env", env)
+	}
+	args = append(args,
+		"--volume", volume+":"+DataDir,
+		image,
+	)
 	return append(args, cfg.Command...)
 }
 
@@ -342,8 +427,16 @@ func (spec replacementSpec) runArgs() []string {
 		"--network", spec.network,
 		"--ip", spec.privateIP,
 		"--publish", publish,
-		"--volume", spec.volume + ":" + DataDir,
-		spec.image,
 	}
+	if spec.auxPublish != "" {
+		args = append(args, "--publish", spec.auxPublish)
+	}
+	for _, env := range spec.env {
+		args = append(args, "--env", env)
+	}
+	args = append(args,
+		"--volume", spec.volume+":"+DataDir,
+		spec.image,
+	)
 	return append(args, spec.command...)
 }

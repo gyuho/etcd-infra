@@ -53,10 +53,22 @@ func runLocalUp(ctx context.Context, args []string) error {
 	name := flags.String("name", defaultClusterName, "cluster name")
 	memberCount := flags.Int("members", 1, "cluster member count (1 or 3)")
 	port := flags.Int("port", 2379, "first host client port")
+	image := flags.String("image", "", "container image override (defaults to the gcr.io release image for --version)")
+	extraArgs := flags.String("extra-args", "", "space-separated extra arguments appended to the etcd server command")
+	env := flags.String("env", "", "comma-separated KEY=VALUE environment variables for the etcd containers")
+	auxPort := flags.String("aux-port", "", "publish one extra container port as containerPort:firstHostPort (host port increments per member)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if err := validateLocalOptions(*name, *memberCount, *port); err != nil {
+		return err
+	}
+	envVars, err := parseLocalEnv(*env)
+	if err != nil {
+		return err
+	}
+	auxMapping, err := parseLocalAuxPort(*auxPort, *memberCount)
+	if err != nil {
 		return err
 	}
 	runtime, err := localContainerRuntime(ctx)
@@ -64,9 +76,15 @@ func runLocalUp(ctx context.Context, args []string) error {
 		return err
 	}
 
-	resolvedVersion, err := resolveVersion(ctx, *version)
-	if err != nil {
-		return err
+	resolvedImage := *image
+	resolvedTag := resolvedImage
+	if resolvedImage == "" {
+		resolvedVersion, err := resolveVersion(ctx, *version)
+		if err != nil {
+			return err
+		}
+		resolvedTag = releaseTag(resolvedVersion)
+		resolvedImage = etcdImage + ":" + resolvedTag
 	}
 	members := localMembers(*name, *memberCount, *port)
 	network := localprovider.NetworkName(*name)
@@ -82,11 +100,18 @@ func runLocalUp(ctx context.Context, args []string) error {
 	manager := localprovider.New(runtime, *name, 0)
 	for i, member := range members {
 		command := append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(member, members, *name, localprovider.DataDir)...)
+		command = append(command, strings.Fields(*extraArgs)...)
+		createConfig := localprovider.CreateConfig{Command: command, Env: envVars}
+		if auxMapping != nil {
+			mapping := *auxMapping
+			mapping.HostPort += i
+			createConfig.AuxPortMapping = &mapping
+		}
 		_, createErr := manager.Create(ctx, compute.NewCreateRequest(
 			compute.WithName(member.Name),
-			compute.WithImage(etcdImage+":"+releaseTag(resolvedVersion)),
+			compute.WithImage(resolvedImage),
 			compute.WithPortMappings([]compute.PortMapping{{ContainerPort: 2379, HostPort: *port + i, HostIP: "127.0.0.1"}}),
-			compute.WithProviderConfig(localprovider.CreateConfig{Command: command}),
+			compute.WithProviderConfig(createConfig),
 		))
 		if createErr != nil {
 			cleanup()
@@ -108,8 +133,42 @@ func runLocalUp(ctx context.Context, args []string) error {
 		return fmt.Errorf("wait for local etcd: %w\n%s", err, logs)
 	}
 
-	fmt.Printf("local etcd %s cluster is healthy at %s\n", releaseTag(resolvedVersion), strings.Join(endpoints, ","))
+	fmt.Printf("local etcd %s cluster is healthy at %s\n", resolvedTag, strings.Join(endpoints, ","))
 	return nil
+}
+
+// parseLocalEnv parses the comma-separated KEY=VALUE --env flag.
+func parseLocalEnv(flag string) ([]string, error) {
+	var envVars []string
+	for _, entry := range splitCSV(flag) {
+		key, _, found := strings.Cut(entry, "=")
+		if !found || key == "" {
+			return nil, fmt.Errorf("invalid --env entry %q, expected KEY=VALUE", entry)
+		}
+		envVars = append(envVars, entry)
+	}
+	return envVars, nil
+}
+
+// parseLocalAuxPort parses the --aux-port flag ("containerPort:firstHostPort")
+// and validates that every member's host port (firstHostPort+i) fits.
+func parseLocalAuxPort(flag string, members int) (*compute.PortMapping, error) {
+	if strings.TrimSpace(flag) == "" {
+		return nil, nil
+	}
+	containerPortText, hostPortText, found := strings.Cut(flag, ":")
+	if !found {
+		return nil, fmt.Errorf("invalid --aux-port %q, expected containerPort:firstHostPort", flag)
+	}
+	containerPort, err := strconv.Atoi(containerPortText)
+	if err != nil || containerPort < 1 || containerPort > 65535 || containerPort == 2379 {
+		return nil, fmt.Errorf("invalid --aux-port container port %q", containerPortText)
+	}
+	hostPort, err := strconv.Atoi(hostPortText)
+	if err != nil || hostPort < 1 || hostPort+members-1 > 65535 {
+		return nil, fmt.Errorf("invalid --aux-port host port range %s-%d", hostPortText, hostPort+members-1)
+	}
+	return &compute.PortMapping{ContainerPort: containerPort, HostPort: hostPort, HostIP: "127.0.0.1"}, nil
 }
 
 func runLocalDown(ctx context.Context, args []string) error {

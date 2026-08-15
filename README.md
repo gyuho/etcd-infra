@@ -37,6 +37,47 @@ Run the checked local replacement smoke test with `./hack/e2e.sh`.
 Docker is used when available and running; otherwise, etcd-infra uses Podman.
 Set `ETCD_INFRA_CONTAINER_RUNTIME=docker` or `podman` to select one explicitly.
 
+`local up` also accepts `--image` to run a custom etcd image (for example a
+fork build), `--extra-args` to append etcd server flags, `--env` for
+comma-separated container environment variables, and `--aux-port` to publish
+one extra container port per member as `containerPort:firstHostPort`:
+
+```bash
+./bin/etcd-infra local up --members 3 --image localhost/my-etcd:dev \
+  --extra-args "--snapshot-count=10 --snapshot-catchup-entries=10" \
+  --env "GOFAIL_HTTP=0.0.0.0:2234,GOFAIL_FAILPOINTS=raftBeforeSave=sleep(100)" \
+  --aux-port 2234:33479
+```
+
+## Snapshot durability E2E (snap.db dir fsync)
+
+`./hack/snapdb-e2e.sh` validates the snap.db directory-fsync fix
+([gyuho/etcd@fix/snapdb-dir-fsync](https://github.com/gyuho/etcd/commits/fix/snapdb-dir-fsync))
+end to end with real binaries, containers, and volumes. It builds
+gofail-enabled images from the fix commit and its unfixed parent
+(`hack/snapdb/build.sh`), then runs three tests
+(`cmd/etcd-infra/local_snapdb_e2e_test.go`):
+
+- **Crash window**: a member SIGKILLed between the snap.db rename and
+  SaveDBFrom's return boots cleanly and catches up via resend — the WAL
+  snapshot record is only written after SaveDBFrom returns, so the crash
+  cannot leave a durable record pointing at an unconfirmed snap.db.
+- **Loud fsync failure**: an injected snap-directory fsync error surfaces in
+  the member's logs ("failed to save incoming database snapshot") instead of
+  silently acknowledging an undurable snapshot, and the member recovers once
+  the leader resends.
+- **Blast radius**: fabricating the post-crash state the fix makes
+  unreachable (durable WAL snapshot record, snap.db directory entry deleted
+  from the volume — what a machine crash does to an un-fsynced rename) makes
+  the member panic loudly on boot with "failed to find database snapshot
+  file", and the documented remediation (wipe and re-add the member) restores
+  the cluster. Runs on the fixed and unfixed images alike, since no local
+  environment can drop the page cache on demand; once the entry is lost, no
+  fsync can bring it back.
+
+Failpoints are armed through `GOFAIL_FAILPOINTS` at process boot so they
+cannot race the leader's snapshot stream.
+
 ## Client selection
 
 Tests use the published etcd v3.7.1 client by default. Set `ETCD_INFRA_CLIENT=custom`

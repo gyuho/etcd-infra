@@ -236,6 +236,7 @@ type containerInspect struct {
 	Config struct {
 		Image  string
 		Cmd    []string
+		Env    []string
 		Labels map[string]string
 	}
 	HostConfig struct {
