@@ -20,7 +20,7 @@ import (
 )
 
 // Snapshot durability E2E tests for the snap.db directory-fsync fix
-// (gyuho/etcd@d73ad4e, fix/snapdb-dir-fsync).
+// (gyuho/etcd, branch fix/snapdb-dir-fsync).
 //
 // Before the fix, SaveDBFrom renamed the received snapshot db into place
 // without fsyncing the snap directory. A hard machine crash could then lose
