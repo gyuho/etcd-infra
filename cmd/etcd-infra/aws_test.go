@@ -104,6 +104,10 @@ func TestValidateAWSUpOptionsBinaryAndEnv(t *testing.T) {
 	opts.BinarySHA256 = "abc123"
 	require.NoError(t, validateAWSUpOptions(opts))
 
+	opts.BinaryURL = "http://insecure.example.com/etcd"
+	require.ErrorContains(t, validateAWSUpOptions(opts), "must be an https URL")
+	opts.BinaryURL = "https://example.com/etcd"
+
 	opts.Env = "GOFAIL_HTTP=127.0.0.1:2234"
 	require.NoError(t, validateAWSUpOptions(opts))
 	opts.Env = "MISSING_EQUALS"

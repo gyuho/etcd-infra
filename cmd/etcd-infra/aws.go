@@ -339,6 +339,9 @@ func validateAWSUpOptions(opts awsUpOptions) error {
 	if (opts.BinaryURL == "") != (opts.BinarySHA256 == "") {
 		return errors.New("--binary-url and --binary-sha256 must be set together")
 	}
+	if opts.BinaryURL != "" && !strings.HasPrefix(opts.BinaryURL, "https://") {
+		return fmt.Errorf("--binary-url must be an https URL, got %q", opts.BinaryURL)
+	}
 	for _, entry := range splitCSV(opts.Env) {
 		key, _, found := strings.Cut(entry, "=")
 		if !found || key == "" {

@@ -61,6 +61,10 @@ run_flavor() {
     local name="${cluster_base}-${flavor}"
     local sha url
     read -r sha url <<< "$(upload "${flavor}")"
+    if [[ -z "${sha}" || -z "${url}" ]]; then
+        echo "binary upload or presign failed for ${flavor}" >&2
+        exit 1
+    fi
 
     local up_args=(
         --name "${name}" --members 3 --arch amd64
@@ -83,10 +87,12 @@ run_flavor() {
     fi
     "${project_root}/bin/etcd-infra" aws up "${up_args[@]}"
 
+    # The per-test context budgets sum to ~95 minutes for the fix flavor;
+    # the go test timeout must exceed them or a slow SSM run dies mid-suite.
     ETCD_INFRA_AWS_E2E_CLUSTER="${name}" \
         ETCD_INFRA_AWS_E2E_FLAVOR="${flavor}" \
         GOCACHE="${GOCACHE:-${project_root}/.release-work/go-build}" \
-        go test -run "^(${tests})$" -count=1 -timeout=60m -v "${project_root}/cmd/etcd-infra"
+        go test -run "^(${tests})$" -count=1 -timeout=120m -v "${project_root}/cmd/etcd-infra"
 
     "${project_root}/bin/etcd-infra" aws down --name "${name}"
 }
