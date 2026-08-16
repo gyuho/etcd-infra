@@ -359,20 +359,39 @@ func TestSnapDBDirSyncErrorLocalE2E(t *testing.T) {
 	t.Logf("%s reported the snap dir fsync failure loudly and recovered via resend", target.Name)
 }
 
-// TestSnapDBDirentLostLocalE2E reproduces the post-crash state that the
-// snap-directory fsync makes unreachable: the member has received a
-// snapshot, the WAL snapshot record is durable, and then the snap.db
-// directory entry is lost — which is exactly what a hard machine crash does
-// when SaveDBFrom never fsynced the directory. The loss is fabricated on the
-// member's data volume because no local environment can drop the page cache
-// on demand; on unfixed code a real power loss in this window produces the
-// identical on-disk state. Bootstrap must fail loudly with the documented
-// panic signature, and wiping and re-adding the member must restore the
-// cluster.
+// TestSnapDBDirentLostLocalE2E confirms the bug's blast radius end to end by
+// reproducing the exact post-crash state the snap-directory fsync fix makes
+// unreachable:
+//
+//  1. a real (unfixed-path) etcd binary receives a snapshot from the leader
+//     over the container network — SaveDBFrom renames snap.db into place;
+//  2. the member's WAL snapshot record is durable (apply is paused past
+//     notifyc by the applyBeforeOpenSnapshot failpoint);
+//  3. the snap.db directory entry is deleted directly from the member's named
+//     data volume — byte-for-byte the state a hard machine crash (power loss,
+//     kernel panic) leaves behind when the rename was never followed by a
+//     directory fsync, because the kernel drops the un-fsynced entry from the
+//     page cache. A container kill alone cannot produce this state: the page
+//     cache survives even SIGKILL, which is why the loss is fabricated on the
+//     volume instead of simulated with signals;
+//  4. on restart, the real bootstrap path (wal.ValidSnapshotEntries ->
+//     RecoverSnapshotBackend) finds the WAL record, cannot find snap.db, and
+//     the member panics with the field-report signature "failed to find
+//     database snapshot file" (etcd-io/etcd issues #11949, #14497, #14569,
+//     all closed without a root cause). The failure is loud, not silent, and
+//     the member stays down — no data is lost, but the member's availability
+//     is gone;
+//  5. the documented remediation — MemberRemove, wipe the data volume,
+//     MemberAdd, and recreate the member with --initial-cluster-state=existing
+//     — restores the member and the cluster converges.
 //
 // The test behaves identically on the fixed and unfixed images: once the
 // dirent is lost, no fsync can bring it back. It documents the failure the
-// fix prevents and validates the remediation path end to end.
+// fix prevents and validates the remediation path end to end. The fix's own
+// evidence is the companion tests: TestSnapDBReceiveCrashWindowLocalE2E pins
+// the ordering (no durable WAL record before SaveDBFrom returns), and
+// TestSnapDBDirSyncErrorLocalE2E pins the error propagation (a fsync failure
+// is reported and the leader resends).
 func TestSnapDBDirentLostLocalE2E(t *testing.T) {
 	f := snapDBE2EFixtureFromEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -409,11 +428,17 @@ func TestSnapDBDirentLostLocalE2E(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	t.Log("SIGKILL the member, then fabricate the machine crash: the kernel never persisted the rename's directory entry")
+	// SIGKILL alone leaves the page cache (and the dirent) intact; deleting
+	// snap.db from the named volume is the exact on-disk result of a hard
+	// crash dropping the un-fsynced directory entry on unfixed code.
 	snapDBKillMember(t, ctx, f, target.Name)
 	snapDBRemoveSnapDBs(t, ctx, f, target.Name)
 
 	t.Log("restart the member; bootstrap finds the WAL snapshot record, cannot find snap.db, and must fail loudly")
 	snapDBStartMember(t, ctx, f, target.Name)
+	// The container must exit (no restart policy) with the panic signature
+	// from the field reports, and stay down: the blast radius is this one
+	// member's availability, never cluster data.
 	require.Eventually(t, func() bool {
 		if snapDBContainerRunning(t, ctx, f, target.Name) {
 			return false
@@ -425,6 +450,10 @@ func TestSnapDBDirentLostLocalE2E(t *testing.T) {
 	t.Logf("%s failed loudly on the lost snap.db directory entry, as in field reports #11949/#14497/#14569", target.Name)
 
 	t.Log("remediate as documented: wipe the member's data dir and re-add it to the cluster")
+	// Membership repair through the surviving quorum: remove the dead member,
+	// wipe its volume, re-add it, and recreate the container with
+	// --initial-cluster-state=existing on the same name, ports, and gofail
+	// endpoint.
 	removeCtx, removeCancel := context.WithTimeout(ctx, 10*time.Second)
 	_, err = cli.MemberRemove(removeCtx, targetMemberID)
 	removeCancel()
