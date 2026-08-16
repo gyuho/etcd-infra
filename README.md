@@ -78,6 +78,34 @@ gofail-enabled images from the fix commit and its unfixed parent
 Failpoints are armed through `GOFAIL_FAILPOINTS` at process boot so they
 cannot race the leader's snapshot stream.
 
+### AWS power-loss validation
+
+`./hack/aws-snapdb-e2e.sh` runs the same suite on EC2 and adds the one test
+no local setup can do: a real machine crash. It builds gofail-enabled
+linux/amd64 binaries from the fix and control commits, uploads them to S3,
+and brings up one cluster per image with `aws up --binary-url` (a presigned
+S3 URL with a verified SHA-256). The tests drive the members over SSM
+RunCommand and systemd, arm failpoints through a systemd drop-in, and finish
+with `TestSnapDBHardPowerLossAWSE2E`: with a snapshot received and the WAL
+record durable, the member is hard-rebooted in-guest with
+`echo b > /proc/sysrq-trigger` — the SysRq reboot(b) command from the EC2
+documentation, issued over SSM because the serial console is not automatable.
+The guest drops its page cache, so only fsynced data survives on EBS; on the
+fixed build the member must boot from the snap.db and rejoin.
+
+For the back-to-back discriminator, `TestSnapDBHardPowerLossNoJournal*AWSE2E`
+reinstalls the target member with its data directory on a loop-mounted ext2
+filesystem (no journal, so the WAL fsync cannot commit the rename's metadata
+as a side effect) before the hard crash: the control build must panic with
+the field-report signature, and the fixed build must boot from the snap.db.
+The fstab entry restores the mount at boot before the etcd unit starts.
+
+Required environment: `AWS_REGION`, `ETCD_INFRA_AWS_VPC`,
+`ETCD_INFRA_AWS_AMI`, `ETCD_INFRA_AWS_INSTANCE_PROFILE`, and
+`ETCD_INFRA_AWS_S3_BUCKET`; optionally `ETCD_INFRA_AWS_SUBNET` and
+`ETCD_INFRA_AWS_SECURITY_GROUPS`. The security group must allow
+member-to-member TCP 2379 and 2380, and TCP 2379 from the test host.
+
 ## Client selection
 
 Tests use the published etcd v3.7.1 client by default. Set `ETCD_INFRA_CLIENT=custom`
@@ -172,3 +200,8 @@ capacity and returning the ASG handle for replacement tracking. The ASG and its
 launch-time bootstrap must restore the stable IP and EBS data volume. The
 standalone `etcd-infra aws up` path does not create an ASG, so it intentionally does
 not expose an `aws replace` command.
+
+`aws up` also accepts `--binary-url` with `--binary-sha256` to install a
+custom etcd binary (for example a gofail-enabled fork build) instead of a
+release tarball, `--extra-args` to append etcd server flags, and `--env` for
+comma-separated KEY=VALUE variables in the etcd systemd unit.

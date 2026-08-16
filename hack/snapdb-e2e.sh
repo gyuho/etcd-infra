@@ -17,6 +17,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Preflight: Podman on macOS can wedge its host port forwarder (gvproxy)
+# after days of VM uptime. A wedged gvproxy leaks listeners for deleted
+# containers, spams "accept tcp ...: use of closed network connection" in its
+# log, and then hangs or rejects new port mappings ("proxy already running"),
+# which fails container creation deep inside a test run. Publish one probe
+# port up front and fail fast with guidance instead.
+if [[ "${ETCD_INFRA_CONTAINER_RUNTIME:-podman}" == "podman" ]]; then
+    probe_image="gcr.io/etcd-development/etcd:v3.7.1"
+    podman pull --quiet "${probe_image}" >/dev/null 2>&1 || true
+    podman run --rm --publish 127.0.0.1:32399:2379 "${probe_image}" /usr/local/bin/etcd --version >/dev/null 2>&1 &
+    probe_pid=$!
+    probe_waited=0
+    while kill -0 "${probe_pid}" 2>/dev/null; do
+        sleep 1
+        probe_waited=$((probe_waited + 1))
+        if (( probe_waited >= 30 )); then
+            kill -9 "${probe_pid}" 2>/dev/null || true
+            echo "ERROR: publishing a container port hung; podman's gvproxy port forwarder is likely wedged." >&2
+            echo "Restart the Podman machine: podman machine stop && podman machine start" >&2
+            exit 1
+        fi
+    done
+    if ! wait "${probe_pid}"; then
+        echo "ERROR: probe container with a published port failed; check podman (gvproxy port forwarder)." >&2
+        echo "If the machine has been up for days, restart it: podman machine stop && podman machine start" >&2
+        exit 1
+    fi
+fi
+
 "${project_root}/hack/snapdb/build.sh"
 "${project_root}/hack/build.sh"
 

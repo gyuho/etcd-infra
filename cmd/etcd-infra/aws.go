@@ -32,6 +32,10 @@ type awsUpOptions struct {
 	IAMInstanceProfile string
 	Arch               string
 	Version            string
+	BinaryURL          string
+	BinarySHA256       string
+	ExtraArgs          string
+	Env                string
 	Members            int
 	DryRun             bool
 }
@@ -81,6 +85,10 @@ func runAWSUp(ctx context.Context, args []string) error {
 	flags.StringVar(&opts.IAMInstanceProfile, "instance-profile", "", "IAM instance profile name or ARN with SSM permissions")
 	flags.StringVar(&opts.Arch, "arch", "amd64", "etcd release architecture (amd64 or arm64)")
 	flags.StringVar(&opts.Version, "version", "latest", "etcd release version")
+	flags.StringVar(&opts.BinaryURL, "binary-url", "", "download a custom etcd binary from this URL instead of the release tarball (requires --binary-sha256)")
+	flags.StringVar(&opts.BinarySHA256, "binary-sha256", "", "SHA-256 checksum of the --binary-url download")
+	flags.StringVar(&opts.ExtraArgs, "extra-args", "", "space-separated extra arguments appended to the etcd server command")
+	flags.StringVar(&opts.Env, "env", "", "comma-separated KEY=VALUE environment variables for the etcd systemd unit")
 	flags.IntVar(&opts.Members, "members", 3, "cluster member count (1 or 3)")
 	flags.BoolVar(&opts.DryRun, "dry-run", true, "show the plan without creating EC2 instances")
 	if err := flags.Parse(args); err != nil {
@@ -91,11 +99,13 @@ func runAWSUp(ctx context.Context, args []string) error {
 		return err
 	}
 
-	resolvedVersion, err := resolveVersion(ctx, opts.Version)
-	if err != nil {
-		return err
+	if opts.BinaryURL == "" {
+		resolvedVersion, err := resolveVersion(ctx, opts.Version)
+		if err != nil {
+			return err
+		}
+		opts.Version = resolvedVersion
 	}
-	opts.Version = resolvedVersion
 	if opts.DryRun {
 		printAWSPlan(opts)
 		return nil
@@ -168,6 +178,14 @@ func runAWSUp(ctx context.Context, args []string) error {
 	}
 
 	members := awsMembers(state)
+	bootstrap := awsBootstrapOptions{
+		Version:      opts.Version,
+		Arch:         opts.Arch,
+		BinaryURL:    opts.BinaryURL,
+		BinarySHA256: opts.BinarySHA256,
+		ExtraArgs:    strings.Fields(opts.ExtraArgs),
+		Env:          splitCSV(opts.Env),
+	}
 	for i, member := range members {
 		instance, getErr := manager.Get(ctx, state.Instances[i].ID)
 		if getErr != nil {
@@ -175,7 +193,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 		}
 		result, commandErr := instance.RunCommandWithOptions(
 			ctx,
-			[]string{"bash", "-ceu", awsBootstrapScript(member, members, opts.Name, opts.Version, opts.Arch)},
+			[]string{"bash", "-ceu", awsBootstrapScript(member, members, opts.Name, bootstrap)},
 			&compute.RunCommandOptions{Timeout: 10 * time.Minute},
 		)
 		if commandErr != nil {
@@ -194,9 +212,14 @@ func runAWSUp(ctx context.Context, args []string) error {
 	if err != nil {
 		return awsSetupError(statePath, state, fmt.Errorf("get health-check instance: %w", err))
 	}
+	healthScript := awsHealthScript(memberClientURLs(members))
+	if opts.BinaryURL != "" {
+		// A custom binary does not ship etcdctl; probe the HTTP health endpoint.
+		healthScript = awsHealthCurlScript(memberClientURLs(members))
+	}
 	result, err := first.RunCommandWithOptions(
 		ctx,
-		[]string{"bash", "-ceu", awsHealthScript(memberClientURLs(members))},
+		[]string{"bash", "-ceu", healthScript},
 		&compute.RunCommandOptions{Timeout: 2 * time.Minute},
 	)
 	if err != nil {
@@ -206,7 +229,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 		return awsSetupError(statePath, state, fmt.Errorf("check AWS etcd health: exit %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr)))
 	}
 
-	fmt.Printf("AWS etcd %s cluster is healthy; state: %s\n", releaseTag(opts.Version), statePath)
+	fmt.Printf("AWS etcd %s cluster is healthy; state: %s\n", awsVersionLabel(opts), statePath)
 	printAWSEndpoints(state)
 	return nil
 }
@@ -313,7 +336,23 @@ func validateAWSUpOptions(opts awsUpOptions) error {
 	if opts.Arch != "amd64" && opts.Arch != "arm64" {
 		return fmt.Errorf("arch must be amd64 or arm64, got %q", opts.Arch)
 	}
+	if (opts.BinaryURL == "") != (opts.BinarySHA256 == "") {
+		return errors.New("--binary-url and --binary-sha256 must be set together")
+	}
+	for _, entry := range splitCSV(opts.Env) {
+		key, _, found := strings.Cut(entry, "=")
+		if !found || key == "" {
+			return fmt.Errorf("invalid --env entry %q, expected KEY=VALUE", entry)
+		}
+	}
 	return nil
+}
+
+func awsVersionLabel(opts awsUpOptions) string {
+	if opts.BinaryURL != "" {
+		return "custom-binary"
+	}
+	return releaseTag(opts.Version)
 }
 
 func printAWSPlan(opts awsUpOptions) {
@@ -321,7 +360,7 @@ func printAWSPlan(opts awsUpOptions) {
 	if opts.SubnetID != "" {
 		fmt.Printf(", subnet %s", opts.SubnetID)
 	}
-	fmt.Printf(", etcd %s/%s\n", releaseTag(opts.Version), opts.Arch)
+	fmt.Printf(", etcd %s/%s\n", awsVersionLabel(opts), opts.Arch)
 	fmt.Println("requires security-group ingress between members on TCP 2379 and 2380")
 	fmt.Println("rerun with --dry-run=false to create the cluster")
 }
@@ -338,16 +377,38 @@ func awsMembers(state awsState) []clusterMember {
 	return members
 }
 
-func awsBootstrapScript(member clusterMember, members []clusterMember, token, version, arch string) string {
-	tag := releaseTag(version)
-	archive := fmt.Sprintf("etcd-%s-linux-%s.tar.gz", tag, arch)
-	releaseURL := "https://github.com/etcd-io/etcd/releases/download/" + tag
-	execStart := shell.JoinArgs(append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(member, members, token, "/var/lib/etcd")...))
+type awsBootstrapOptions struct {
+	Version      string   // etcd release version (ignored when BinaryURL is set)
+	Arch         string   // etcd release architecture
+	BinaryURL    string   // custom etcd binary URL (replaces the release download)
+	BinarySHA256 string   // SHA-256 of the custom binary
+	ExtraArgs    []string // extra etcd server arguments
+	Env          []string // KEY=VALUE environment for the systemd unit
+}
 
-	return fmt.Sprintf(`set -euo pipefail
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-archive=%s
+func awsBootstrapScript(member clusterMember, members []clusterMember, token string, opts awsBootstrapOptions) string {
+	execStart := shell.JoinArgs(append(
+		append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(member, members, token, "/var/lib/etcd")...),
+		opts.ExtraArgs...,
+	))
+
+	var install string
+	if opts.BinaryURL != "" {
+		// Custom binary (for example a gofail-enabled fork build): download and
+		// verify it like the release artifacts. Only the etcd binary is
+		// installed; etcdctl/etcdutl are not part of a custom build.
+		install = fmt.Sprintf(`binary=%s
+binary_sha256=%s
+curl -fsSL "$binary" -o "$tmp/etcd"
+echo "$binary_sha256  $tmp/etcd" > "$tmp/checksum"
+(cd "$tmp" && sha256sum -c checksum)
+install -m 0755 "$tmp/etcd" /usr/local/bin/etcd`,
+			shell.Quote(opts.BinaryURL), shell.Quote(opts.BinarySHA256))
+	} else {
+		tag := releaseTag(opts.Version)
+		archive := fmt.Sprintf("etcd-%s-linux-%s.tar.gz", tag, opts.Arch)
+		releaseURL := "https://github.com/etcd-io/etcd/releases/download/" + tag
+		install = fmt.Sprintf(`archive=%s
 release_url=%s
 curl -fsSL "$release_url/$archive" -o "$tmp/$archive"
 curl -fsSL "$release_url/SHA256SUMS" -o "$tmp/SHA256SUMS"
@@ -356,7 +417,14 @@ grep -E "[[:space:]]+$archive$" "$tmp/SHA256SUMS" > "$tmp/checksum"
 tar -xzf "$tmp/$archive" -C "$tmp"
 install -m 0755 "$tmp/${archive%%.tar.gz}/etcd" /usr/local/bin/etcd
 install -m 0755 "$tmp/${archive%%.tar.gz}/etcdctl" /usr/local/bin/etcdctl
-install -m 0755 "$tmp/${archive%%.tar.gz}/etcdutl" /usr/local/bin/etcdutl
+install -m 0755 "$tmp/${archive%%.tar.gz}/etcdutl" /usr/local/bin/etcdutl`,
+			shell.Quote(archive), shell.Quote(releaseURL))
+	}
+
+	return fmt.Sprintf(`set -euo pipefail
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+%s
 install -d -m 0700 /var/lib/etcd
 cat > /etc/systemd/system/etcd-infra.service <<'EOF'
 [Unit]
@@ -366,7 +434,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s
+%sExecStart=%s
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=40000
@@ -376,7 +444,19 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now etcd-infra.service
-`, shell.Quote(archive), shell.Quote(releaseURL), execStart)
+`, install, awsSystemdEnvironment(opts.Env), execStart)
+}
+
+// awsSystemdEnvironment renders systemd Environment= lines, one per KEY=VALUE
+// entry. Values are double-quoted because failpoint terms contain spaces and
+// quotes (for example GOFAIL_FAILPOINTS=fp=return("msg")).
+func awsSystemdEnvironment(env []string) string {
+	var b strings.Builder
+	for _, entry := range env {
+		escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(entry)
+		fmt.Fprintf(&b, "Environment=\"%s\"\n", escaped)
+	}
+	return b.String()
 }
 
 func awsHealthScript(endpoints []string) string {
@@ -384,6 +464,18 @@ func awsHealthScript(endpoints []string) string {
 		`for attempt in $(seq 1 60); do ETCDCTL_API=3 /usr/local/bin/etcdctl --endpoints=%s endpoint health --cluster && exit 0; sleep 2; done; exit 1`,
 		shell.Quote(strings.Join(endpoints, ",")),
 	)
+}
+
+// awsHealthCurlScript probes the HTTP health endpoint of every member. It is
+// used with custom binaries, which do not install etcdctl.
+func awsHealthCurlScript(endpoints []string) string {
+	var b strings.Builder
+	b.WriteString("for attempt in $(seq 1 60); do ok=1\n")
+	for _, endpoint := range endpoints {
+		fmt.Fprintf(&b, "curl -fsS %s/health | grep -q '\"health\":\"true\"' || ok=0\n", shell.Quote(endpoint))
+	}
+	b.WriteString("[[ $ok == 1 ]] && exit 0; sleep 2; done; exit 1")
+	return b.String()
 }
 
 func awsSetupError(statePath string, state awsState, err error) error {
