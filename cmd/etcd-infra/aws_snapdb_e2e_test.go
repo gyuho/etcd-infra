@@ -44,12 +44,12 @@ import (
 // one, otherwise private IPs, so run from a network with VPC access or allow
 // the test host in the security group.
 const (
-	awsE2EClusterEnv  = "ETCD_INFRA_AWS_E2E_CLUSTER"
-	awsE2EFlavorEnv   = "ETCD_INFRA_AWS_E2E_FLAVOR"
-	awsE2EService     = "etcd-infra.service"
-	awsE2EDataDir     = "/var/lib/etcd"
-	awsE2EGofailAddr  = "http://127.0.0.1:2234"
-	awsE2EReadyTimout = 10 * time.Minute
+	awsE2EClusterEnv   = "ETCD_INFRA_AWS_E2E_CLUSTER"
+	awsE2EFlavorEnv    = "ETCD_INFRA_AWS_E2E_FLAVOR"
+	awsE2EService      = "etcd-infra.service"
+	awsE2EDataDir      = "/var/lib/etcd"
+	awsE2EGofailAddr   = "http://127.0.0.1:2234"
+	awsE2EReadyTimeout = 10 * time.Minute
 )
 
 type awsSnapDBE2EFixture struct {
@@ -145,7 +145,9 @@ func awsE2EReinstallMember(t *testing.T, ctx context.Context, f awsSnapDBE2EFixt
 
 	members := awsMembers(f.state)
 	command := append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(members[idx], members, f.state.Name, awsE2EDataDir)...)
-	command = append(command, "--snapshot-count=10", "--snapshot-catchup-entries=10")
+	// Keep the reinstalled member consistent with the bootstrap flags; the
+	// later --log-level wins over the warn default in etcdServerArgs.
+	command = append(command, "--snapshot-count=10", "--snapshot-catchup-entries=10", "--log-level=info")
 	for i, arg := range command {
 		if arg == "new" && i > 0 && command[i-1] == "--initial-cluster-state" {
 			command[i] = "existing"
@@ -251,20 +253,25 @@ func awsE2EStartEtcd(t *testing.T, ctx context.Context, instance compute.Instanc
 
 // awsE2EKillEtcd SIGKILLs etcd and stops the unit in the same command, so
 // systemd's Restart=on-failure (RestartSec=5s) cannot restart the process
-// before the test finishes mutating the data directory.
+// before the test finishes mutating the data directory. The kill tolerates
+// an already-dead process; the stop is what matters.
 func awsE2EKillEtcd(t *testing.T, ctx context.Context, instance compute.Instance) {
 	t.Helper()
-	awsE2ERun(t, ctx, instance, "systemctl kill --signal SIGKILL "+awsE2EService+"; systemctl stop "+awsE2EService)
+	awsE2ERun(t, ctx, instance, "systemctl kill --signal SIGKILL "+awsE2EService+" || true; systemctl stop "+awsE2EService)
 }
 
 // awsE2EHardCrash reboots the instance immediately through the in-guest SysRq
 // trigger: no sync, no unmount, page cache dropped — the EC2 equivalent of
 // power loss. The SSM agent dies with the guest, so the command error is
 // expected and ignored; WaitForReady then waits for the instance to boot and
-// SSM to come back.
+// SSM to come back. The boot ID must change: without that proof, a lost
+// sysrq command would let the power-loss tests pass against an instance that
+// never crashed.
 func awsE2EHardCrash(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, idx int) {
 	t.Helper()
 	instance := f.instances[idx]
+	bootBefore := strings.TrimSpace(awsE2ERun(t, ctx, instance, "cat /proc/sys/kernel/random/boot_id").Stdout)
+
 	crashCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, _ = instance.RunCommandWithOptions(
 		crashCtx,
@@ -272,8 +279,20 @@ func awsE2EHardCrash(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, i
 		&compute.RunCommandOptions{Timeout: 20 * time.Second},
 	)
 	cancel()
-	_, err := f.manager.WaitForReady(ctx, instance.ID(), awsE2EReadyTimout)
+	_, err := f.manager.WaitForReady(ctx, instance.ID(), awsE2EReadyTimeout)
 	require.NoError(t, err, "instance %s never came back after the sysrq hard crash", instance.ID())
+
+	require.Eventually(t, func() bool {
+		result, err := instance.RunCommandWithOptions(
+			ctx,
+			[]string{"cat", "/proc/sys/kernel/random/boot_id"},
+			&compute.RunCommandOptions{Timeout: 30 * time.Second},
+		)
+		if err != nil || result.ExitCode != 0 {
+			return false
+		}
+		return strings.TrimSpace(result.Stdout) != bootBefore
+	}, 5*time.Minute, 5*time.Second, "instance %s never rebooted (boot ID unchanged)", instance.ID())
 }
 
 func awsE2EJournal(t *testing.T, ctx context.Context, instance compute.Instance, currentBootOnly bool) string {
