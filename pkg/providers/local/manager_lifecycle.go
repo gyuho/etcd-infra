@@ -227,7 +227,7 @@ func (m *Manager) restoreContainer(ctx context.Context, before replacementSpec) 
 				return fmt.Errorf("local: container %s was not replaced", before.name)
 			}
 			if after.privateIP != before.privateIP || after.volume != before.volume ||
-				after.auxPublish != before.auxPublish || !slices.Equal(after.env, before.env) {
+				after.auxPublish != before.auxPublish || !sameEnv(after.env, before.env) {
 				// The running container violates the replacement identity and
 				// must not serve the member. It carries this cluster's label
 				// (ownedContainer passed), so remove it and let the next tick
@@ -413,6 +413,20 @@ func createRunArgs(cluster, name, image, volume string, port compute.PortMapping
 		image,
 	)
 	return append(args, cfg.Command...)
+}
+
+// sameEnv compares two environment lists as multisets. Environment variables
+// are an unordered name-to-value mapping, but runtimes do not preserve the
+// creation order in inspect output (Podman reorders entries), so an
+// order-sensitive comparison reports a false replacement-identity mismatch.
+func sameEnv(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as, bs := slices.Clone(a), slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
 }
 
 func (spec replacementSpec) runArgs() []string {

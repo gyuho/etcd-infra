@@ -79,6 +79,20 @@ func TestCapabilities(t *testing.T) {
 	))
 }
 
+func TestSameEnvIsOrderInsensitive(t *testing.T) {
+	t.Parallel()
+
+	// Podman reorders Config.Env entries in inspect output; the replacement
+	// identity check must treat the same set in a different order as equal.
+	require.True(t, sameEnv(
+		[]string{"container=podman", "PATH=/usr/bin", "HOME=/root", "HOSTNAME=abc"},
+		[]string{"HOSTNAME=abc", "PATH=/usr/bin", "container=podman", "HOME=/root"},
+	))
+	require.False(t, sameEnv([]string{"A=1"}, []string{"A=1", "B=2"}))
+	require.False(t, sameEnv([]string{"A=1", "A=1"}, []string{"A=1", "A=2"}))
+	require.True(t, sameEnv(nil, nil))
+}
+
 func TestCreateRunArgs(t *testing.T) {
 	t.Parallel()
 
