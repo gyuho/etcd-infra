@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -88,6 +89,11 @@ func tryAWSSSMPortForward(ctx context.Context, awsCLI, region, bastionID, host s
 		"--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
 		"--parameters", parameters,
 	)
+	// The CLI execs session-manager-plugin as its own child. A plain Kill
+	// would orphan the plugin, which keeps the session AND the inherited
+	// stdout pipe open — and Cmd.Wait then blocks forever waiting for the
+	// pipe's readers. Run them in their own process group and kill the group.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", nil, fmt.Errorf("pipe session output: %w", err)
@@ -103,8 +109,17 @@ func tryAWSSSMPortForward(ctx context.Context, awsCLI, region, bastionID, host s
 			return
 		}
 		stopped = true
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
 	}
 
 	// Keep draining stdout after readiness so the plugin never blocks on a

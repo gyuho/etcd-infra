@@ -128,12 +128,19 @@ run_flavor() {
 
     # The per-test context budgets sum to ~95 minutes for the fix flavor;
     # the go test timeout must exceed them or a slow SSM run dies mid-suite.
+    # Capture the test result explicitly: the outer "run_flavor ... || exit=$?"
+    # disables set -e for this function, and the trailing "aws down" would
+    # otherwise mask a go test failure with its own success.
+    local test_exit=0
     ETCD_INFRA_AWS_E2E_CLUSTER="${name}" \
         ETCD_INFRA_AWS_E2E_FLAVOR="${flavor}" \
         GOCACHE="${GOCACHE:-${project_root}/.release-work/go-build}" \
-        go test -run "^(${tests})$" -count=1 -timeout=120m -v "${project_root}/cmd/etcd-infra"
+        go test -run "^(${tests})$" -count=1 -timeout=120m -v "${project_root}/cmd/etcd-infra" || test_exit=$?
 
-    "${project_root}/bin/etcd-infra" aws down --name "${name}"
+    if ! "${project_root}/bin/etcd-infra" aws down --name "${name}"; then
+        echo "WARN: aws down failed for ${name}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+    fi
+    return "${test_exit}"
 }
 
 # The snapDBRenameBeforeDirSync and snapDBDirSyncError failpoints exist only
