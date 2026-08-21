@@ -24,6 +24,10 @@
 #   ETCD_INFRA_AWS_STRESS_DURATION   seconds per stress scenario (default: 60)
 #   ETCD_INFRA_AWS_STRESS_WORKERS    concurrent workers (default: 10)
 #   ETCD_INFRA_AWS_STRESS_RPS        requests per second (default: 100)
+#   ETCD_INFRA_SLOW_PATH_MULTIPLIER  latency-budget multiplier for the
+#                                    bastion-tunnel path (default: 2)
+#   ETCD_INFRA_CLIENT                "custom" builds the leader-aware client
+#                                    from the fork (default: official)
 #   ETCD_INFRA_AWS_REPLACE_MEMBER    when set (member name or "leader"), create
 #                                    the cluster with --replaceable and replace
 #                                    this member between the two conformance

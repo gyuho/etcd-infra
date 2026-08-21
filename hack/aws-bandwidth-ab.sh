@@ -14,7 +14,9 @@
 # from hack/aws-e2e.iam-policy.json.
 #
 # Optional: ETCD_INFRA_AWS_STRESS_DURATION (default 120),
-# ETCD_INFRA_AWS_STRESS_WORKERS (10), ETCD_INFRA_AWS_STRESS_RPS (100).
+# ETCD_INFRA_AWS_STRESS_WORKERS (10), ETCD_INFRA_AWS_STRESS_RPS (100),
+# ETCD_INFRA_AWS_VERSION (etcd release, default: latest), and
+# ETCD_INFRA_SLOW_PATH_MULTIPLIER for latency budgets (default: 2).
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

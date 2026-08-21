@@ -26,7 +26,9 @@
 # needs a public ingress rule — mirroring production, where etcd is never
 # exposed publicly. The bastion shares the members' security groups, so
 # bastion-to-member traffic is covered by the member-to-member rules. The
-# test host needs the AWS CLI and session-manager-plugin in PATH.
+# test host needs the AWS CLI and session-manager-plugin in PATH. The
+# script sets ETCD_INFRA_AWS_E2E_CLUSTER and ETCD_INFRA_AWS_E2E_FLAVOR itself
+# to gate the go tests onto each cluster it brings up.
 #
 # Credentials: run this with the least-privilege user from
 # hack/aws-e2e.iam-policy.json (tagged-instance EC2 lifecycle in one region,
