@@ -291,6 +291,12 @@ func (cfg *Config) RunScenarios() (scenarios.StressResults, error) {
 					"total", len(cfg.ScenarioIDs),
 					"took", time.Since(start).String(),
 					"output", last.Output,
+					// Request counters in the pass line: benchmark harnesses
+					// need per-scenario throughput without re-deriving it.
+					"requests", last.TotalRequests,
+					"successful", last.SuccessfulRequests,
+					"p99_ms", last.P99Latency.Milliseconds(),
+					"avg_ms", last.AverageLatency.Milliseconds(),
 				)
 			} else {
 				logutil.S().Warnw("SCENARIO FAILED",
