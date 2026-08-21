@@ -36,9 +36,43 @@ func (m *Manager) Create(ctx context.Context, req compute.CreateRequest) (comput
 		return nil, err
 	}
 
-	out, err := m.ec2.RunInstances(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("aws: run instances: %w", err)
+	// InsufficientInstanceCapacity is per-AZ and transient: alternate between
+	// the VPC's subnets on each attempt, and keep retrying for a few minutes —
+	// AZ capacity replenishes on that order, while the SDK's internal retries
+	// exhaust in seconds.
+	var out *ec2.RunInstancesOutput
+	capacityDeadline := time.Now().Add(3 * time.Minute)
+	alternatesLoaded := false
+	var alternates []string
+	for {
+		out, err = m.ec2.RunInstances(ctx, input)
+		if err == nil {
+			break
+		}
+		if !isInsufficientCapacityError(err) || time.Now().After(capacityDeadline) {
+			return nil, fmt.Errorf("aws: run instances: %w", err)
+		}
+		if !alternatesLoaded {
+			alternatesLoaded = true
+			alternates = m.otherSubnetIDs(ctx, op.VPCID, aws.ToString(input.SubnetId))
+		}
+		if len(alternates) > 0 {
+			alt := alternates[0]
+			alternates = append(alternates[1:], alt)
+			logutil.S().Infow("aws: insufficient capacity, retrying in another subnet", "subnet", alt)
+			op.SubnetID = alt
+			input, err = m.buildRunInstancesInput(ctx, op)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		logutil.S().Infow("aws: insufficient capacity, retrying", "error", err)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("aws: run instances: %w", ctx.Err())
+		case <-time.After(30 * time.Second):
+		}
 	}
 	if len(out.Instances) == 0 {
 		return nil, errors.New("aws: run instances returned no instances")
@@ -492,7 +526,11 @@ func (m *Manager) DeleteClusterVolumes(ctx context.Context, cluster string) erro
 			}
 		}
 		if _, err := m.ec2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volumeID)}); err != nil {
-			errs = append(errs, fmt.Errorf("aws: delete data volume %s: %w", volumeID, err))
+			// Already gone is the desired end state (a raced retry, or a volume
+			// deleted between the describe and the delete).
+			if !isVolumeNotFoundError(err) {
+				errs = append(errs, fmt.Errorf("aws: delete data volume %s: %w", volumeID, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -640,6 +678,45 @@ func buildTagSpecifications(op compute.Op) []types.TagSpecification {
 // dataVolumeDeviceName is the block device name used for the dedicated etcd
 // data volume at launch and reattach.
 const dataVolumeDeviceName = "/dev/xvdf"
+
+// otherSubnetIDs lists the VPC's subnets other than the given one, for
+// capacity failover.
+func (m *Manager) otherSubnetIDs(ctx context.Context, vpcID, current string) []string {
+	out, err := m.ec2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		Filters: []types.Filter{{Name: aws.String("vpc-id"), Values: []string{vpcID}}},
+	})
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, subnet := range out.Subnets {
+		id := aws.ToString(subnet.SubnetId)
+		if id != "" && id != current {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// isInsufficientCapacityError reports whether the error is EC2's
+// InsufficientInstanceCapacity.
+func isInsufficientCapacityError(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InsufficientInstanceCapacity" {
+		return true
+	}
+	return strings.Contains(err.Error(), "InsufficientInstanceCapacity")
+}
+
+// isVolumeNotFoundError reports whether the error is EC2's
+// InvalidVolume.NotFound.
+func isVolumeNotFoundError(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidVolume.NotFound" {
+		return true
+	}
+	return strings.Contains(err.Error(), "InvalidVolume.NotFound")
+}
 
 // isIPAddressInUseError reports whether the error is EC2's
 // InvalidIPAddress.InUse, raised when a recently terminated instance's

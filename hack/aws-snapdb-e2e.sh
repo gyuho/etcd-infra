@@ -126,7 +126,13 @@ run_flavor() {
     if [[ -n "${ETCD_INFRA_AWS_SECURITY_GROUPS:-}" ]]; then
         up_args+=(--security-groups "${ETCD_INFRA_AWS_SECURITY_GROUPS}")
     fi
-    "${project_root}/bin/etcd-infra" aws up "${up_args[@]}"
+    # Do not run the tests against a cluster that never came up: with the
+    # outer "|| flavor_exit" disabling set -e for this function, an up failure
+    # must return before go test, or every test fails on a broken cluster.
+    if ! "${project_root}/bin/etcd-infra" aws up "${up_args[@]}"; then
+        echo "aws up failed for ${name}; skipping its tests" >&2
+        return 1
+    fi
 
     # The per-test context budgets sum to ~95 minutes for the fix flavor;
     # the go test timeout must exceed them or a slow SSM run dies mid-suite.
