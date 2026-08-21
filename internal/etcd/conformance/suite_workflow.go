@@ -546,6 +546,7 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 
 		var finalErr error
 		var totalTook time.Duration
+		finalRecorded := false
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			logutil.S().Infow("starting conformance scenario",
 				"scenario", scenario,
@@ -555,10 +556,22 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 				"maxAttempts", maxAttempts,
 			)
 
+			resultsBefore := len(conformanceRunner.Results())
 			start := time.Now()
 			err := runScenarioWithTimeout(conformanceRunner, runnerFunc, scenario, scenarioTimeout)
 			took := time.Since(start)
 			totalTook += took
+
+			// Scenarios report failures through their recorded result, not the
+			// wrapper: the wrapper only sees timeouts and panics. Inspect what
+			// this attempt recorded so internally-reported failures also retry.
+			recorded := false
+			if err == nil {
+				if failure := lastRecordedFailure(conformanceRunner.Results(), resultsBefore, scenario); failure != nil {
+					recorded = true
+					err = fmt.Errorf("scenario %s failed: %s", scenario, failure.Output)
+				}
+			}
 
 			if err == nil {
 				logutil.S().Infow("conformance scenario passed",
@@ -573,6 +586,7 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 			}
 
 			finalErr = err
+			finalRecorded = recorded
 			if attempt < maxAttempts {
 				logutil.S().Warnw("conformance scenario failed, will retry",
 					"scenario", scenario,
@@ -583,6 +597,11 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 					"maxAttempts", maxAttempts,
 					"error", err,
 				)
+				// Drop the failed attempt's record so the tally reflects only
+				// the final attempt's outcome.
+				if dropper, ok := conformanceRunner.(interface{ DropResultsFrom(int) }); ok {
+					dropper.DropResultsFrom(resultsBefore)
+				}
 				// Brief pause before retry to let network stabilize
 				time.Sleep(2 * time.Second)
 			} else {
@@ -598,12 +617,15 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 		}
 
 		if finalErr != nil {
-			// Record the failure and continue with remaining scenarios
-			conformanceRunner.RecordResult(scenarios.Result{
-				Scenario: scenario,
-				Success:  false,
-				Output:   finalErr.Error(),
-			})
+			// Record the failure and continue with remaining scenarios, unless
+			// the failing attempt already recorded it.
+			if !finalRecorded {
+				conformanceRunner.RecordResult(scenarios.Result{
+					Scenario: scenario,
+					Success:  false,
+					Output:   finalErr.Error(),
+				})
+			}
 			continue
 		}
 
@@ -616,6 +638,21 @@ func (cfg *Config) RunScenarios() (scenarios.Results, error) {
 	}
 
 	return conformanceRunner.Results(), nil
+}
+
+// lastRecordedFailure returns the failure recorded for the scenario at or
+// after index before, or nil. Scenario functions report failures via their
+// deferred RecordResult; the timeout wrapper cannot see them.
+func lastRecordedFailure(results scenarios.Results, before int, scenario string) *scenarios.Result {
+	for i := len(results) - 1; i >= before; i-- {
+		if results[i].Scenario == scenario {
+			if !results[i].Success {
+				return &results[i]
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // runScenarioWithTimeout executes a scenario with a maximum timeout.
@@ -677,6 +714,18 @@ func (r *runner) RecordResult(rs scenarios.Result) {
 	defer r.resultsMu.Unlock()
 
 	r.results = append(r.results, rs)
+}
+
+// DropResultsFrom removes all results recorded at or after index n. Used by
+// the retry loop to discard a failed attempt's record before retrying, so
+// the final tally reflects only the final attempt's outcome.
+func (r *runner) DropResultsFrom(n int) {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+
+	if n < len(r.results) {
+		r.results = r.results[:n]
+	}
 }
 
 func (r *runner) Results() scenarios.Results {
