@@ -52,7 +52,7 @@ one extra container port per member as `containerPort:firstHostPort`:
 ## Snapshot durability E2E (snap.db dir fsync)
 
 `./hack/snapdb-e2e.sh` validates the snap.db directory-fsync fix
-([gyuho/etcd@fix/snapdb-dir-fsync](https://github.com/gyuho/etcd/commits/fix/snapdb-dir-fsync))
+([gyuho/etcd@test](https://github.com/gyuho/etcd/commits/test))
 end to end with real binaries, containers, and volumes. It builds
 gofail-enabled images from the fix commit and its unfixed parent
 (`hack/snapdb/build.sh`), then runs three tests
@@ -161,13 +161,18 @@ URLs; the scripts already require `AWS_REGION`.
 ## Client selection
 
 Tests use the published etcd v3.7.1 client by default. Set `ETCD_INFRA_CLIENT=custom`
-to import the leader-aware client from the fork branch
-[`leader-aware-client-balancer`](https://github.com/gyuho/etcd/commits/leader-aware-client-balancer/)
-(`go.custom.mod` replaces `go.etcd.io/etcd/client/v3` with
-`github.com/gyuho/etcd/client/v3` at a pinned commit, and tracks etcd main
-pseudo-versions for `api/v3` and `client/pkg/v3` because the fork's client
-needs the Masterminds semver migration that predates the published
-v3.8.0-alpha.0 tag):
+to import the leader-aware client from the fork
+([`gyuho/etcd`](https://github.com/gyuho/etcd)) — `go.custom.mod` replaces
+`go.etcd.io/etcd/client/v3` with `github.com/gyuho/etcd/client/v3` at a
+pinned commit of the client-only slice, and tracks etcd main pseudo-versions
+for `api/v3` and `client/pkg/v3` (the fork's client needs the Masterminds
+semver migration, which the published v3.8.0-alpha.0 tag predates). The full
+stack — response-driven leader hints plus the snap.db fix — lives on branch
+[`test`](https://github.com/gyuho/etcd/commits/test/); its client couples to
+the branch's own `api` module, which Go module rules cannot replace (declared
+paths carry /v3, fork directory paths do not), so the go.mod import uses the
+client-only commit, and the server binaries are built from branch `test`
+in-repo by `hack/snapdb/build.sh`:
 
 ```bash
 ./hack/unit.sh

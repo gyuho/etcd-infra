@@ -2,9 +2,11 @@
 # Builds gofail-enabled etcd images from the snap.db dir-fsync fix branch and
 # its unfixed parent commit, for the snapshot durability E2E tests.
 #
-#   fix:     gyuho/etcd branch fix/snapdb-dir-fsync head — SaveDBFrom fsyncs
+#   fix:     gyuho/etcd branch test head — SaveDBFrom fsyncs
 #            the snap directory and exposes the snapDBRenameBeforeDirSync and
-#            snapDBDirSyncError failpoints.
+#            snapDBDirSyncError failpoints. The branch head must be the snap.db
+#            fix commit (its parent becomes the control), or pin exact commits
+#            with ETCD_INFRA_SNAPDB_FIX_SHA / ETCD_INFRA_SNAPDB_CONTROL_SHA.
 #   control: the fix commit's parent (unfixed) — SaveDBFrom renames without a
 #            directory fsync; used to document the failure mode the fix
 #            prevents.
@@ -20,7 +22,7 @@ base_image="gcr.io/etcd-development/etcd:v3.7.1"
 # commits at build time: fix = branch head, control = its parent (the unfixed
 # base). Pin exact commits with ETCD_INFRA_SNAPDB_FIX_SHA /
 # ETCD_INFRA_SNAPDB_CONTROL_SHA for reproducibility.
-fix_ref="${ETCD_INFRA_SNAPDB_FIX_REF:-fix/snapdb-dir-fsync}"
+fix_ref="${ETCD_INFRA_SNAPDB_FIX_REF:-test}"
 if [[ -n "${ETCD_INFRA_SNAPDB_FIX_SHA:-}" && -n "${ETCD_INFRA_SNAPDB_CONTROL_SHA:-}" ]]; then
     fix_sha="${ETCD_INFRA_SNAPDB_FIX_SHA}"
     control_sha="${ETCD_INFRA_SNAPDB_CONTROL_SHA}"

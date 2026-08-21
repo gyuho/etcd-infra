@@ -17,7 +17,7 @@ import (
 )
 
 // AWS end-to-end tests for the snap.db directory-fsync fix
-// (gyuho/etcd, branch fix/snapdb-dir-fsync). They mirror the local container
+// (gyuho/etcd, branch test). They mirror the local container
 // suite in local_snapdb_e2e_test.go — same fault sequence, same assertions —
 // with two AWS-specific mechanics:
 //

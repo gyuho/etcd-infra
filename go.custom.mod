@@ -85,4 +85,9 @@ require (
 	golang.org/x/arch v0.29.0 // indirect
 )
 
+// The client-only slice of the fork: the test branch's client/v3 depends on
+// the branch's own api module (ResponseHeader.leader_id), and the fork's api
+// and client/pkg submodules cannot be replace targets (their declared paths
+// carry /v3, their directory paths do not). This commit is the client-only
+// slice, compatible with released servers via Status-based leader discovery.
 replace go.etcd.io/etcd/client/v3 => github.com/gyuho/etcd/client/v3 v3.0.0-20260821090745-59f6ecbcf129
