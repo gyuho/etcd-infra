@@ -107,8 +107,10 @@ func runMetrics(ctx context.Context, args []string) error {
 	ticker := time.NewTicker(*watch)
 	defer ticker.Stop()
 	for {
+		// A monitor must survive its target: the suites restart and crash
+		// members constantly, so a failed sample is a marked row, not an exit.
 		if err := printMetricsSample(ctx, eps); err != nil {
-			return err
+			fmt.Printf("%s SAMPLE_ERROR %v\n", time.Now().UTC().Format(time.RFC3339), err)
 		}
 		select {
 		case <-ctx.Done():
