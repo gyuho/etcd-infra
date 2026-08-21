@@ -132,7 +132,11 @@ stress_args=(
 if [[ -n "${ETCD_INFRA_AWS_STRESS_SCENARIO:-}" ]]; then
     stress_args+=(--scenario "${ETCD_INFRA_AWS_STRESS_SCENARIO}")
 fi
-"${project_root}/bin/etcd-infra" stress "${stress_args[@]}"
+# SSM port-forwarding adds ~150ms/RTT plus proxy jitter; under load, marginal
+# p99 measurements land just over thresholds tuned for direct/VPN links. The
+# multiplier scales those thresholds only (success rates stay strict).
+ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
+    "${project_root}/bin/etcd-infra" stress "${stress_args[@]}"
 
 "${project_root}/bin/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-after.txt"
 before_sent=$(awk '/^TOTAL/ {print $2}' "${tmpdir}/metrics-before.txt")

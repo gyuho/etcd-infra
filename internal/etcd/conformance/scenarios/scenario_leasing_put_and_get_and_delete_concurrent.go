@@ -105,7 +105,9 @@ func RunLeasingPutAndGetAndDeleteConcurrent(runner Runner) {
 	// Use a generous timeout (90s) to accommodate cloud/VPN environments (Tailscale/Headscale)
 	// where concurrent leasing operations have significantly higher latency.
 	// 8 workers doing Put/Get/Delete for 8 KVs each over high-latency networks requires more time.
-	timeout := time.After(90 * time.Second)
+	// The slow-path multiplier extends it for SSM port-forwarding (observed:
+	// 6/8 workers timed out in a full-suite run through the bastion tunnels).
+	timeout := time.After(testtime.ScaleDuration(90 * time.Second))
 	for i := range workerCount {
 		var workerErr error
 		select {

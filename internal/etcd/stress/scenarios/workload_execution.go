@@ -12,6 +12,17 @@ import (
 	"git.tbd/etcd-infra/pkg/randutil"
 )
 
+// p99LatencyMultiplier scales every scenario's maxP99 threshold on
+// high-latency client paths (see testtime.SlowPathMultiplier).
+// Success-rate checks are unaffected: correctness stays strict.
+var p99LatencyMultiplier = sync.OnceValue(func() float64 {
+	f := testtime.SlowPathMultiplier()
+	if f != 1 {
+		logutil.S().Infow("scaling scenario p99 thresholds for a high-latency path", "multiplier", f)
+	}
+	return f
+})
+
 type workloadOpFunc func(workerID int, errCh chan<- error)
 
 func runWorkers(concurrency int, fn workloadOpFunc) []error {
@@ -163,6 +174,9 @@ func finalizeScenario(result *Result, metrics *MetricsCollector, errs []error, m
 		return stats
 	}
 
+	if maxP99 > 0 {
+		maxP99 *= p99LatencyMultiplier()
+	}
 	if maxP99 > 0 && stats.P99LatencyMs > maxP99 {
 		result.Success = false
 		result.Output = fmt.Sprintf("P99 latency too high: %.0fms (expected <= %.0fms)", stats.P99LatencyMs, maxP99)

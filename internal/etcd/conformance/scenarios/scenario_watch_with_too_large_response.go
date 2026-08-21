@@ -72,8 +72,11 @@ func RunWatchWithTooLargeResponse(runner Runner) {
 		}(i)
 	}
 	// Use generous timeout for cloud/VPN environments where large PUT operations
-	// (12 x 1MB) can have significant latency over high-latency networks.
-	timeout := time.After(120 * time.Second)
+	// (12 x 1MB) can have significant latency over high-latency networks; the
+	// slow-path multiplier extends it for SSM port-forwarding, where 1 MB puts
+	// through the tunnel take ~15s each under concurrency (observed: 8/12 in
+	// 120s).
+	timeout := time.After(testtime.ScaleDuration(120 * time.Second))
 	for i := range keys {
 		select {
 		case err = <-errc:

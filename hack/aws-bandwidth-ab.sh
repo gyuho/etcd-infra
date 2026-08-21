@@ -93,6 +93,7 @@ total_sent() { awk '/^TOTAL/ {print $2}' "$1"; }
 run_leg() {
     local label="$1" binary="$2"
     "${binary}" metrics --endpoints "${endpoints}" > "${tmpdir}/${label}-before.txt"
+    ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
     "${binary}" stress --endpoints "${endpoints}" \
         --scenario CONCURRENT_PUTS \
         --duration "${ETCD_INFRA_AWS_STRESS_DURATION:-120}" \
