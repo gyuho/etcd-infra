@@ -89,27 +89,64 @@ func scrapePeerBytes(ctx context.Context, endpoints []string) (map[string][2]flo
 
 // runMetrics prints one snapshot of the peer-byte counters per endpoint plus
 // totals. Diff two snapshots around a run to measure the run's peer traffic;
-// the sent-bytes delta is the bandwidth the client routing consumed.
+// the sent-bytes delta is the bandwidth the client routing consumed. With
+// --watch it prints one timestamped row per endpoint every interval until
+// interrupted, for time-series monitoring of a live run.
 func runMetrics(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("metrics", flag.ContinueOnError)
 	endpoints := flags.String("endpoints", defaultEndpoint, "comma-separated etcd endpoints")
+	watch := flags.Duration("watch", 0, "resample every interval until interrupted (e.g. 15s)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	eps := splitEndpoints(*endpoints)
 
-	values, err := scrapePeerBytes(ctx, splitEndpoints(*endpoints))
+	if *watch <= 0 {
+		return printMetricsSnapshot(ctx, eps)
+	}
+	ticker := time.NewTicker(*watch)
+	defer ticker.Stop()
+	for {
+		if err := printMetricsSample(ctx, eps); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func printMetricsSnapshot(ctx context.Context, endpoints []string) error {
+	values, err := scrapePeerBytes(ctx, endpoints)
 	if err != nil {
 		return err
 	}
 
 	var totalSent, totalReceived float64
 	fmt.Printf("%-40s %20s %20s\n", "ENDPOINT", "PEER_SENT_BYTES", "PEER_RECV_BYTES")
-	for _, endpoint := range splitEndpoints(*endpoints) {
+	for _, endpoint := range endpoints {
 		pair := values[endpoint]
 		totalSent += pair[0]
 		totalReceived += pair[1]
 		fmt.Printf("%-40s %20.0f %20.0f\n", endpoint, pair[0], pair[1])
 	}
 	fmt.Printf("%-40s %20.0f %20.0f\n", "TOTAL", totalSent, totalReceived)
+	return nil
+}
+
+// printMetricsSample prints one row per endpoint:
+// <timestamp> <endpoint> <peer-sent> <peer-received>.
+func printMetricsSample(ctx context.Context, endpoints []string) error {
+	values, err := scrapePeerBytes(ctx, endpoints)
+	if err != nil {
+		return err
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, endpoint := range endpoints {
+		pair := values[endpoint]
+		fmt.Printf("%s %s %.0f %.0f\n", ts, endpoint, pair[0], pair[1])
+	}
 	return nil
 }
