@@ -52,8 +52,13 @@ goarch="${ETCD_INFRA_SNAPDB_ARCH:-${default_goarch}}"
 
 build_image() {
     local flavor="$1" sha="$2"
-    local image="localhost/etcd-infra-etcd:snapdb-${flavor}"
-    local stamp="${work_root}/image-${flavor}.sha"
+    # The image tag and cache stamp are per-architecture: the same commit is
+    # built for the host arch (local container runs) and for amd64 (the AWS
+    # suite), and reusing a cached image of the wrong arch ships an
+    # unrunnable binary to the target.
+    local image="localhost/etcd-infra-etcd:snapdb-${flavor}-${goarch}"
+    local stamp="${work_root}/image-${flavor}-${goarch}.sha"
+    local outdir="${work_root}/image-${flavor}-${goarch}"
     if [[ "${ETCD_INFRA_SNAPDB_REBUILD:-0}" != "1" ]] \
         && [[ -f "${stamp}" ]] && [[ "$(cat "${stamp}")" == "${sha}" ]] \
         && "${runtime}" image inspect "${image}" >/dev/null 2>&1; then
@@ -62,7 +67,6 @@ build_image() {
     fi
 
     local clone="${work_root}/etcd-${flavor}"
-    local outdir="${work_root}/image-${flavor}"
     rm -rf "${outdir}"
     mkdir -p "${outdir}"
 

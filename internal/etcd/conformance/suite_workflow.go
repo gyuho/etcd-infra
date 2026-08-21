@@ -507,6 +507,13 @@ func shouldRetryScenario(scenario string) bool {
 		// can hit a member that hasn't applied the raft entry yet, causing
 		// a freshly-granted lease to transiently appear missing.
 		return true
+	case scenario == "LEASING_PUT_AND_GET_AND_DELETE_CONCURRENT":
+		// 8 leasing clients x 8 KVs serialize lease acquisitions over many
+		// RTTs; over SSM port-forwarding (~150ms/RTT) on a cluster still
+		// settling from prior scenarios, the 90s budget can be exhausted
+		// transiently. Observed: 6/8 workers timed out in a full-suite AWS
+		// run, then passed 3/3 in isolation with the same client.
+		return true
 	default:
 		return false
 	}

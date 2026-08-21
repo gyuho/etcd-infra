@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -34,7 +33,6 @@ const (
 	performancePeerBlockRequestCount = performancePeerRequestCount / 2
 	performancePeerPayloadBytes      = 64 << 10
 	performancePeerTrafficMaxPercent = 85
-	peerSentBytesMetric              = "etcd_network_peer_sent_bytes_total"
 
 	reliabilityPutInterval          = 50 * time.Millisecond
 	reliabilityPutTimeout           = 750 * time.Millisecond
@@ -788,62 +786,22 @@ func waitForAppliedIndexAgreement(ctx context.Context, cli *clientv3.Client, end
 	}
 }
 
-// etcd_network_peer_sent_bytes_total counts serialized Raft messages rather
-// than TCP/TLS framing. That makes it the causal server-side measure of the
-// redundant proposal copy; summing received bytes too would double-count it.
+// scrapePeerSentBytes sums the peer-sent counter per endpoint, using the
+// shared scraper from metrics.go. etcd_network_peer_sent_bytes_total counts
+// serialized Raft messages rather than TCP/TLS framing, which makes it the
+// causal server-side measure of the redundant proposal copy; summing received
+// bytes too would double-count it.
 func scrapePeerSentBytes(ctx context.Context, endpoints []string) (map[string]float64, error) {
 	values := make(map[string]float64, len(endpoints))
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	for _, endpoint := range endpoints {
-		value, err := scrapePeerSentBytesAt(ctx, httpClient, strings.TrimRight(endpoint, "/")+"/metrics")
+		value, err := scrapePeerMetric(ctx, httpClient, endpoint, peerSentBytesMetric)
 		if err != nil {
 			return nil, fmt.Errorf("scrape peer-sent bytes from %s: %w", endpoint, err)
 		}
 		values[endpoint] = value
 	}
 	return values, nil
-}
-
-func scrapePeerSentBytesAt(ctx context.Context, httpClient *http.Client, metricsURL string) (float64, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metricsURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	response, err := httpClient.Do(request)
-	if err != nil {
-		return 0, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("metrics returned %s", response.Status)
-	}
-
-	var total float64
-	series := 0
-	scanner := bufio.NewScanner(response.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, peerSentBytesMetric+"{") && !strings.HasPrefix(line, peerSentBytesMetric+" ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			return 0, fmt.Errorf("malformed %s sample %q", peerSentBytesMetric, line)
-		}
-		value, err := strconv.ParseFloat(fields[1], 64)
-		if err != nil {
-			return 0, fmt.Errorf("parse %s sample %q: %w", peerSentBytesMetric, line, err)
-		}
-		total += value
-		series++
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-	if series == 0 {
-		return 0, fmt.Errorf("metrics omitted %s", peerSentBytesMetric)
-	}
-	return total, nil
 }
 
 func peerSentBytesDelta(before, after map[string]float64) (float64, error) {

@@ -32,7 +32,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: etcd-infra <install|local|aws|stress|conformance>")
+		return errors.New("usage: etcd-infra <install|local|aws|stress|conformance|metrics>")
 	}
 
 	switch args[0] {
@@ -46,6 +46,8 @@ func run(ctx context.Context, args []string) error {
 		return runStress(args[1:])
 	case "conformance":
 		return runConformance(args[1:])
+	case "metrics":
+		return runMetrics(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}

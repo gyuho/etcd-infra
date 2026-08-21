@@ -228,25 +228,53 @@ func waitForSnapDBLog(t *testing.T, ctx context.Context, f snapDBE2EFixture, mem
 // work here: the VM kernel keeps buffering peer TCP traffic for the frozen
 // process, and on resume the member can drain the backlog and catch up from
 // raft entries, so the leader never sends a snapshot.
+// The leader snapshots on its own apply loop, so a single round can lose the
+// race: the member reconnects before the leader's snapshotter compacts the
+// raft log past the member's position and catches up from plain entries. Each
+// round pushes the leader another snapshot-count plus catchup-entries ahead
+// of the still-stopped member, so a bounded retry converges deterministically.
 func driveSnapshotToMember(t *testing.T, ctx context.Context, f snapDBE2EFixture, cli *clientv3.Client, memberIdx int) {
 	t.Helper()
 	member := f.members[memberIdx]
-	snapDBStopMember(t, ctx, f, member.Name)
 
-	var revision int64
-	for i := 0; i < snapDBSnapshotKeys; i++ {
-		putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		resp, err := cli.Put(putCtx, fmt.Sprintf("/etcd-infra-e2e/snapdb/%s/%06d", member.Name, i), "payload")
+	for round := 1; ; round++ {
+		snapDBStopMember(t, ctx, f, member.Name)
+		// A completed apply renames snap.db to .snap, so a *.snap.db present
+		// while the member is stopped is by definition a stale interrupted-save
+		// artifact; the probe must only match a snapshot from this round.
+		snapDBRemoveSnapDBs(t, ctx, f, member.Name)
+
+		var revision int64
+		for i := 0; i < snapDBSnapshotKeys; i++ {
+			putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			resp, err := cli.Put(putCtx, fmt.Sprintf("/etcd-infra-e2e/snapdb/%s/%06d", member.Name, i), "payload")
+			cancel()
+			require.NoError(t, err)
+			revision = resp.Header.Revision
+		}
+		compactCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := cli.Compact(compactCtx, revision)
 		cancel()
 		require.NoError(t, err)
-		revision = resp.Header.Revision
-	}
-	compactCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_, err := cli.Compact(compactCtx, revision)
-	cancel()
-	require.NoError(t, err)
 
-	snapDBStartMember(t, ctx, f, member.Name)
+		snapDBStartMember(t, ctx, f, member.Name)
+
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(snapDBFiles(t, ctx, f, member.Name)) > 0 {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("context done while waiting for snap.db on %s: %v", member.Name, ctx.Err())
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		if round == 3 {
+			t.Fatalf("%s never received a snapshot db after %d rounds", member.Name, round)
+		}
+		t.Logf("no snapshot streamed in round %d (member caught up from the leader's log); driving further ahead", round)
+	}
 }
 
 func waitForSnapDBFile(t *testing.T, ctx context.Context, f snapDBE2EFixture, member string) {
@@ -312,7 +340,13 @@ func TestSnapDBReceiveCrashWindowLocalE2E(t *testing.T) {
 
 	t.Log("restart the member; with no WAL snapshot record it must boot cleanly and receive the snapshot again")
 	snapDBStartMember(t, ctx, f, target.Name)
-	waitForSnapDBLog(t, ctx, f, target.Name, "saved database snapshot to disk")
+	// The resend reuses the same snapshot id (no entries commit between the
+	// kill and the resend), so SaveDBFrom takes its idempotent path, which
+	// skips the "saved database snapshot to disk" line. The rafthttp handler
+	// line is emitted on both save paths, and the killed first attempt never
+	// reached it (SaveDBFrom never returned), so it is unambiguous even in
+	// the accumulated container logs.
+	waitForSnapDBLog(t, ctx, f, target.Name, "received and saved database snapshot")
 	assertSnapDBKVHashEqual(t, ctx, f, cli)
 	require.NotContains(t, snapDBMemberLogs(t, ctx, f, target.Name), "failed to find database snapshot file")
 	t.Logf("%s survived a SIGKILL inside the SaveDBFrom crash window and caught up via resend", target.Name)
@@ -347,12 +381,22 @@ func TestSnapDBDirSyncErrorLocalE2E(t *testing.T) {
 	waitForSnapDBLog(t, ctx, f, target.Name, "injected snap dir fsync failure")
 
 	t.Log("remove the failure for the running process; the leader resends the snapshot and the member catches up")
-	// The resend for the same snapshot id takes the idempotent path in
-	// SaveDBFrom (the interrupted attempt left the renamed snap.db behind),
-	// which fsyncs the directory but skips the "saved database snapshot to
-	// disk" log line, so the recovery signal is the rafthttp handler's line.
+	// The interrupted attempt left the renamed snap.db behind, and the resend
+	// for the same snapshot id would take SaveDBFrom's idempotent path, which
+	// bypasses the snapDBDirSyncError failpoint — a silent no-op clear would
+	// still "recover". Remove the orphan first so the resend must take the
+	// rename path through the failpoint: if the clear did nothing, the save
+	// fails again and the wait times out loudly.
+	snapDBRemoveSnapDBs(t, ctx, f, target.Name)
 	gofailClear(t, ctx, f, targetIdx, "snapDBDirSyncError")
-	waitForSnapDBLog(t, ctx, f, target.Name, "received and saved database snapshot")
+	// Restart so the member reconnects fresh: the failed save broke its
+	// receive stream, and the leader's snapshot resend cadence is not prompt
+	// or guaranteed. With the failpoint cleared the member then converges — by
+	// resend-snapshot or by log entries. If the clear were a silent no-op, the
+	// next save would fail again and convergence would time out loudly.
+	snapDBStopMember(t, ctx, f, target.Name)
+	snapDBStartMember(t, ctx, f, target.Name)
+	assertSnapDBKVHashEqual(t, ctx, f, cli)
 	assertSnapDBKVHashEqual(t, ctx, f, cli)
 	t.Logf("%s reported the snap dir fsync failure loudly and recovered via resend", target.Name)
 }

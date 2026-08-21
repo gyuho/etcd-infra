@@ -28,6 +28,12 @@ type fakeEC2 struct {
 	stopIDs                   []string
 	startIDs                  []string
 	describeInstancesInput    *ec2.DescribeInstancesInput
+	attachedVolumes           []string
+	deletedVolumes            []string
+	attachVolumeErr           error
+	deleteVolumeErr           error
+	describeVolumesOutput     *ec2.DescribeVolumesOutput
+	describeVolumesErr        error
 	subnets                   []types.Subnet
 	securityGroups            []types.SecurityGroup
 	runOutput                 *ec2.RunInstancesOutput
@@ -97,6 +103,32 @@ func (f *fakeEC2) DescribeSecurityGroups(_ context.Context, _ *ec2.DescribeSecur
 		return nil, f.describeSecurityGroupsErr
 	}
 	return &ec2.DescribeSecurityGroupsOutput{SecurityGroups: f.securityGroups}, nil
+}
+
+func (f *fakeEC2) AttachVolume(_ context.Context, input *ec2.AttachVolumeInput, _ ...func(*ec2.Options)) (*ec2.AttachVolumeOutput, error) {
+	f.attachedVolumes = append(f.attachedVolumes, *input.VolumeId)
+	if f.attachVolumeErr != nil {
+		return nil, f.attachVolumeErr
+	}
+	return &ec2.AttachVolumeOutput{}, nil
+}
+
+func (f *fakeEC2) DeleteVolume(_ context.Context, input *ec2.DeleteVolumeInput, _ ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error) {
+	f.deletedVolumes = append(f.deletedVolumes, *input.VolumeId)
+	if f.deleteVolumeErr != nil {
+		return nil, f.deleteVolumeErr
+	}
+	return &ec2.DeleteVolumeOutput{}, nil
+}
+
+func (f *fakeEC2) DescribeVolumes(_ context.Context, _ *ec2.DescribeVolumesInput, _ ...func(*ec2.Options)) (*ec2.DescribeVolumesOutput, error) {
+	if f.describeVolumesErr != nil {
+		return nil, f.describeVolumesErr
+	}
+	if f.describeVolumesOutput != nil {
+		return f.describeVolumesOutput, nil
+	}
+	return &ec2.DescribeVolumesOutput{}, nil
 }
 
 func (f *fakeEC2) DescribeInstances(_ context.Context, input *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
@@ -417,10 +449,15 @@ func TestReplaceMachineTerminatesASGInstance(t *testing.T) {
 	require.Equal(t, "i-asg-member", aws.ToString(fake.terminateInput.InstanceId))
 	require.False(t, aws.ToBool(fake.terminateInput.ShouldDecrementDesiredCapacity))
 
+	// Standalone instances take the standalone replacement path: with no ASG
+	// client the manager goes straight to it (and fails here only because the
+	// fake has no such instance); a non-ASG member with an ASG client falls
+	// back to the same path (and fails here because the manager has no EC2
+	// client).
 	_, err = newWithEC2(&fakeEC2{}).ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-standalone"))
-	require.ErrorIs(t, err, compute.ErrNotSupported)
+	require.ErrorContains(t, err, "not found for replacement")
 	_, err = (&Manager{asg: &fakeASG{}}).ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-standalone"))
-	require.ErrorIs(t, err, compute.ErrNotSupported)
+	require.ErrorContains(t, err, "ec2 client is nil")
 	warm := &fakeASG{describeInstancesOutput: &autoscaling.DescribeAutoScalingInstancesOutput{
 		AutoScalingInstances: []asgtypes.AutoScalingInstanceDetails{{
 			InstanceId:           aws.String("i-warm"),
@@ -431,6 +468,122 @@ func TestReplaceMachineTerminatesASGInstance(t *testing.T) {
 	_, err = (&Manager{asg: warm}).ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-warm"))
 	require.ErrorIs(t, err, compute.ErrNotSupported)
 	require.Nil(t, warm.terminateInput)
+}
+
+func TestReplaceMachineStandalonePreservesIdentityAndVolume(t *testing.T) {
+	t.Parallel()
+
+	original := types.Instance{
+		InstanceId:       aws.String("i-old"),
+		ImageId:          aws.String("ami-1"),
+		InstanceType:     types.InstanceType("t3a.medium"),
+		SubnetId:         aws.String("subnet-1"),
+		PrivateIpAddress: aws.String("10.0.0.5"),
+		KeyName:          aws.String("key-1"),
+		SecurityGroups:   []types.GroupIdentifier{{GroupId: aws.String("sg-1")}},
+		IamInstanceProfile: &types.IamInstanceProfile{
+			Arn: aws.String("arn:aws:iam::123:profile/p"),
+		},
+		Tags: []types.Tag{
+			{Key: aws.String("Name"), Value: aws.String("cluster-1")},
+			{Key: aws.String("etcd-infra.cluster"), Value: aws.String("cluster")},
+			{Key: aws.String("aws:cloudformation:stack"), Value: aws.String("skip-me")},
+		},
+		BlockDeviceMappings: []types.InstanceBlockDeviceMapping{
+			{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-root")}},
+			{DeviceName: aws.String("/dev/xvdf"), Ebs: &types.EbsInstanceBlockDevice{VolumeId: aws.String("vol-data")}},
+		},
+	}
+	terminated := original
+	terminated.State = &types.InstanceState{Name: types.InstanceStateNameTerminated}
+
+	newRunning := types.Instance{
+		InstanceId:       aws.String("i-new"),
+		PrivateIpAddress: aws.String("10.0.0.5"),
+		State:            &types.InstanceState{Name: types.InstanceStateNameRunning},
+	}
+	fake := &fakeEC2{
+		describeInstancesPages: []*ec2.DescribeInstancesOutput{
+			{Reservations: []types.Reservation{{Instances: []types.Instance{original}}}},
+			{Reservations: []types.Reservation{{Instances: []types.Instance{terminated}}}},
+			{Reservations: []types.Reservation{{Instances: []types.Instance{newRunning}}}},
+		},
+		runOutput: &ec2.RunInstancesOutput{Instances: []types.Instance{{
+			InstanceId:       aws.String("i-new"),
+			PrivateIpAddress: aws.String("10.0.0.5"),
+		}}},
+		describeVolumesOutput: &ec2.DescribeVolumesOutput{
+			Volumes: []types.Volume{{VolumeId: aws.String("vol-data"), State: types.VolumeStateAvailable}},
+		},
+	}
+	mgr := newWithEC2(fake)
+
+	result, err := mgr.ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-old"))
+	require.NoError(t, err)
+	assert.Equal(t, compute.InstanceHandle("i-old"), result.PreviousID)
+	assert.Equal(t, compute.InstanceHandle("i-new"), result.ID)
+	assert.Empty(t, result.Group)
+
+	// The old instance was terminated, and the replacement relaunched with
+	// the preserved identity: same IP, subnet, SGs, AMI, profile, key, and
+	// only the non-aws tags.
+	require.Equal(t, []string{"i-old"}, fake.terminateIDs)
+	input := fake.runInput
+	require.NotNil(t, input)
+	assert.Equal(t, "10.0.0.5", aws.ToString(input.PrivateIpAddress))
+	assert.Equal(t, "subnet-1", aws.ToString(input.SubnetId))
+	assert.Equal(t, []string{"sg-1"}, input.SecurityGroupIds)
+	assert.Equal(t, "ami-1", aws.ToString(input.ImageId))
+	assert.Equal(t, "key-1", aws.ToString(input.KeyName))
+	require.NotNil(t, input.IamInstanceProfile)
+	assert.Equal(t, "arn:aws:iam::123:profile/p", aws.ToString(input.IamInstanceProfile.Arn))
+	require.Len(t, input.TagSpecifications, 1)
+	for _, tag := range input.TagSpecifications[0].Tags {
+		assert.NotContains(t, aws.ToString(tag.Key), "aws:cloudformation")
+	}
+
+	// The preserved data volume was reattached to the replacement.
+	assert.Equal(t, []string{"vol-data"}, fake.attachedVolumes)
+}
+
+func TestReplaceMachineFallsBackToStandaloneOnASGError(t *testing.T) {
+	t.Parallel()
+
+	// A caller without autoscaling permissions (the least-privilege e2e
+	// policy) gets an ASG lookup error, not a membership miss; the manager
+	// must still take the standalone path.
+	original := types.Instance{
+		InstanceId:       aws.String("i-old"),
+		ImageId:          aws.String("ami-1"),
+		InstanceType:     types.InstanceType("t3a.medium"),
+		SubnetId:         aws.String("subnet-1"),
+		PrivateIpAddress: aws.String("10.0.0.5"),
+	}
+	terminated := original
+	terminated.State = &types.InstanceState{Name: types.InstanceStateNameTerminated}
+	fakeEC2Client := &fakeEC2{
+		describeInstancesPages: []*ec2.DescribeInstancesOutput{
+			{Reservations: []types.Reservation{{Instances: []types.Instance{original}}}},
+			{Reservations: []types.Reservation{{Instances: []types.Instance{terminated}}}},
+		},
+		runOutput: &ec2.RunInstancesOutput{Instances: []types.Instance{{
+			InstanceId: aws.String("i-new"), PrivateIpAddress: aws.String("10.0.0.5"),
+		}}},
+	}
+	mgr := &Manager{
+		ec2: fakeEC2Client,
+		asg: &fakeASG{describeInstancesErr: errors.New("AccessDenied")},
+	}
+	result, err := mgr.ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-old"))
+	require.NoError(t, err)
+	assert.Equal(t, compute.InstanceHandle("i-new"), result.ID)
+	assert.Equal(t, []string{"i-old"}, fakeEC2Client.terminateIDs)
+	assert.Empty(t, fakeEC2Client.attachedVolumes, "no data volume on the original, so no attach")
+
+	// Without an EC2 client the ASG error is surfaced.
+	_, err = (&Manager{asg: &fakeASG{describeInstancesErr: errors.New("AccessDenied")}}).
+		ReplaceMachine(context.Background(), compute.NewReplaceRequest("i-old"))
+	require.ErrorContains(t, err, "describe ASG membership")
 }
 
 func TestGetAndList(t *testing.T) {

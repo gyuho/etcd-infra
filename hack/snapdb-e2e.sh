@@ -51,7 +51,7 @@ fi
 
 run_case() {
     local flavor="$1" test="$2" failpoints="$3"
-    local image="localhost/etcd-infra-etcd:snapdb-${flavor}"
+    local image="localhost/etcd-infra-etcd:snapdb-${flavor}-$(uname -m | sed 's/x86_64/amd64/;s/amd64/amd64/;s/aarch64/arm64/')"
     # Arm the failpoint from process boot via GOFAIL_FAILPOINTS: setting it
     # over HTTP after a member restart would race the leader's snapshot
     # stream, which can arrive within milliseconds of boot.

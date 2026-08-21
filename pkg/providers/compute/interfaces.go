@@ -78,6 +78,11 @@ type ReplaceRequest struct {
 type ReplaceResult struct {
 	PreviousID InstanceHandle
 	Group      GroupHandle
+	// ID is the replacement machine's handle when the replacement is a new
+	// machine with a new handle (AWS standalone instance replacement). It is
+	// empty when the provider reuses the handle (local containers) or a group
+	// creates the replacement asynchronously (AWS ASG).
+	ID InstanceHandle
 }
 
 // PowerRequest describes an instance start/stop operation.

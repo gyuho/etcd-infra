@@ -83,8 +83,8 @@ cannot race the leader's snapshot stream.
 `./hack/aws-snapdb-e2e.sh` runs the same suite on EC2 and adds the one test
 no local setup can do: a real machine crash. It builds gofail-enabled
 linux/amd64 binaries from the fix and control commits, uploads them to S3,
-and brings up one cluster per image with `aws up --binary-url` (a presigned
-S3 URL with a verified SHA-256). The tests drive the members over SSM
+and brings up one cluster per image with `aws up --binary-url --bastion` (a
+presigned S3 URL with a verified SHA-256, plus an SSM-only bastion relay). The tests drive the members over SSM
 RunCommand and systemd, arm failpoints through a systemd drop-in, and finish
 with `TestSnapDBHardPowerLossAWSE2E`: with a snapshot received and the WAL
 record durable, the member is hard-rebooted in-guest with
@@ -101,10 +101,62 @@ the field-report signature, and the fixed build must boot from the snap.db.
 The fstab entry restores the mount at boot before the etcd unit starts.
 
 Required environment: `AWS_REGION`, `ETCD_INFRA_AWS_VPC`,
-`ETCD_INFRA_AWS_AMI`, `ETCD_INFRA_AWS_INSTANCE_PROFILE`, and
-`ETCD_INFRA_AWS_S3_BUCKET`; optionally `ETCD_INFRA_AWS_SUBNET` and
-`ETCD_INFRA_AWS_SECURITY_GROUPS`. The security group must allow
-member-to-member TCP 2379 and 2380, and TCP 2379 from the test host.
+`ETCD_INFRA_AWS_AMI`, and `ETCD_INFRA_AWS_INSTANCE_PROFILE`; optionally
+`ETCD_INFRA_AWS_SUBNET`, `ETCD_INFRA_AWS_SECURITY_GROUPS`, and
+`ETCD_INFRA_AWS_S3_BUCKET` (default derived from account, region, and
+month). The security groups must allow
+member-to-member TCP 2379 and 2380; the bastion joins the same groups, so
+bastion-to-member traffic needs no extra rules. Client traffic rides SSM
+port-forwarding through the bastion, so no inbound rule for the test host is
+required and etcd is never exposed publicly. The test host needs the AWS CLI
+and session-manager-plugin.
+
+Use least-privilege credentials: `hack/aws-e2e.iam-policy.json` is fully
+portable — every ARN wildcards account and region, and no per-account
+resource IDs appear, so the same file attaches unchanged in any AWS account.
+Only one naming convention must pre-exist in the account: an
+instance-profile role named `etcd-infra-ssm` with
+`AmazonSSMManagedInstanceCore` attached. The S3 upload bucket needs no setup:
+`hack/aws-snapdb-e2e.sh` derives the name as
+`etcd-infra-e2e-<account>-<region>-v0-<YYYYMM>` — deterministic within a
+month, rotated by name — and creates it with public access blocked on first
+use (set `ETCD_INFRA_AWS_S3_BUCKET` to override). The blast radius is bounded by
+tag gates, not pinned resource IDs: instances must carry the
+`etcd-infra.cluster` tag at creation, and only tagged instances and volumes
+can be terminated, deleted, attached, or driven over SSM. The tag gates check
+key presence with any value, so the user can also drive another engineer's
+etcd-infra cluster in the same account; everything without the tag, EKS
+included, is unreachable.
+
+Setup in a fresh account (any region):
+
+```bash
+# instance-profile role the test instances run as (SSM-driven orchestration)
+aws iam create-role --role-name etcd-infra-ssm --assume-role-policy-document '{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow",
+    "Principal": {"Service": "ec2.amazonaws.com"},
+    "Action": "sts:AssumeRole"}]
+}'
+aws iam attach-role-policy --role-name etcd-infra-ssm \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam attach-role-policy --role-name etcd-infra-ssm \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+aws iam create-instance-profile --instance-profile-name etcd-infra-ssm
+aws iam add-role-to-instance-profile --instance-profile-name etcd-infra-ssm \
+  --role-name etcd-infra-ssm
+
+# the least-privilege user
+aws iam create-user --user-name etcd-infra-aws-e2e
+aws iam create-policy --policy-name etcd-infra-aws-e2e \
+  --policy-document file://hack/aws-e2e.iam-policy.json
+aws iam attach-user-policy --user-name etcd-infra-aws-e2e \
+  --policy-arn arn:aws:iam::<account-id>:policy/etcd-infra-aws-e2e
+aws iam create-access-key --user-name etcd-infra-aws-e2e
+```
+
+The AWS CLI region must match the bucket's region for uploads and presigned
+URLs; the scripts already require `AWS_REGION`.
 
 ## Client selection
 
@@ -171,6 +223,15 @@ instance profile. It does not create network or IAM infrastructure. The AMI
 must provide systemd, curl, tar, sha256sum, and a running SSM agent. Security
 groups must allow member-to-member TCP 2379 and 2380.
 
+Pass `--bastion` to add a dedicated SSM-only relay instance (default
+`t3a.nano`, or `t4g.nano` with `--arch arm64`; override with
+`--bastion-instance-type`) in the same subnet and security groups. The AWS
+e2e tests then reach member TCP 2379 over SSM port-forwarding through the
+bastion instead of dialing instance IPs directly, so etcd needs no inbound
+security-group rule from the test host — the production-realistic topology.
+The relay only shuttles TCP streams, which is why it is sized far below the
+members; it runs no test code.
+
 Preview is the default and makes no AWS changes:
 
 ```bash
@@ -193,13 +254,52 @@ Create only after reviewing the plan:
 
 AWS state is stored under `~/.etcd-infra/aws/`. Created clusters use plain HTTP
 inside the supplied VPC and are intended only for isolated test infrastructure.
+If a run is interrupted mid-creation (for example SIGKILL between an instance
+launch and the state write), an unrecorded instance can remain; the tag is the
+source of truth — find and terminate orphans with
+`aws ec2 describe-instances --filters Name=tag:etcd-infra.cluster,Values=<name>`.
 
-The AWS compute manager implements `compute.Lifecycle.ReplaceMachine` for a
-verified in-service ASG member, terminating it without decrementing desired
-capacity and returning the ASG handle for replacement tracking. The ASG and its
-launch-time bootstrap must restore the stable IP and EBS data volume. The
-standalone `etcd-infra aws up` path does not create an ASG, so it intentionally does
-not expose an `aws replace` command.
+The AWS compute manager implements `compute.Lifecycle.ReplaceMachine` two
+ways. For a verified in-service ASG member it terminates the instance without
+decrementing desired capacity and returns the ASG handle for replacement
+tracking; the ASG and its launch-time bootstrap must restore the stable IP
+and EBS data volume. For a standalone instance created with `--replaceable`
+it captures the launch spec, terminates the instance, relaunches it with the
+same private IP and tags, and reattaches the member's dedicated data volume
+(`DeleteOnTermination=false`), so the member keeps its identity and its data
+dir:
+
+```bash
+./bin/etcd-infra aws up ... --replaceable
+./bin/etcd-infra aws replace --name my-cluster --member leader   # or a member name
+```
+
+`aws replace` resolves "leader" over client endpoints (bastion tunnels when
+the cluster has one), then re-bootstraps the replacement with the recorded
+release version, extra args, and environment. Clusters created with
+`--binary-url` cannot be replaced: the presigned URL expires.
+`hack/aws-conformance-stress-e2e.sh` runs a replace between its two
+conformance passes when `ETCD_INFRA_AWS_REPLACE_MEMBER` is set (member name
+or "leader"), mirroring `hack/e2e.sh`. `aws down` deletes the tagged data
+volumes.
+
+`./hack/aws-replace-e2e.sh` is the AWS counterpart of the local replacement
+E2E tests: `TestAWSReplaceLeaderHandoffAWSE2E` replaces the leader's machine
+and asserts a new leader is elected during the outage, and
+`TestAWSReplaceFollowerAWSE2E` replaces a follower while the cluster keeps
+serving. Both assert the replacement keeps the member's name, private IP, and
+data. Required environment matches the conformance/stress script.
+
+`aws tunnel --name <cluster>` opens one SSM port-forwarding session per
+member through the bastion, prints the loopback client endpoints as one CSV
+line on stdout, and holds the sessions until interrupted (progress goes to
+stderr). Conformance and stress runs against a bastion cluster go through it.
+
+`./hack/aws-conformance-stress-e2e.sh` wraps the whole flow: build, `aws up
+--bastion`, tunnels, the conformance suite, the stress suite, teardown.
+Required environment: `AWS_REGION`, `ETCD_INFRA_AWS_VPC`,
+`ETCD_INFRA_AWS_AMI`, and `ETCD_INFRA_AWS_INSTANCE_PROFILE`; optional
+scenario and stress-tuning overrides are listed in the script header.
 
 `aws up` also accepts `--binary-url` with `--binary-sha256` to install a
 custom etcd binary (for example a gofail-enabled fork build) instead of a

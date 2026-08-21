@@ -40,9 +40,13 @@ import (
 //
 // The tests skip unless ETCD_INFRA_AWS_E2E_CLUSTER names a cluster created by
 // "etcd-infra aws up" (see hack/aws-snapdb-e2e.sh). The test host must reach
-// the members on TCP 2379: the tests use public IPs when every instance has
-// one, otherwise private IPs, so run from a network with VPC access or allow
-// the test host in the security group.
+// the members on TCP 2379. Clusters created with "aws up --bastion" are
+// reached over SSM port-forwarding through the bastion relay, so client
+// traffic originates inside the VPC and no security-group rule for the test
+// host is required (the production-realistic path). Without a bastion, the
+// tests dial member IPs directly: public IPs when every instance has one,
+// otherwise private IPs, so run from a network with VPC access or allow the
+// test host in the security group.
 const (
 	awsE2EClusterEnv   = "ETCD_INFRA_AWS_E2E_CLUSTER"
 	awsE2EFlavorEnv    = "ETCD_INFRA_AWS_E2E_FLAVOR"
@@ -77,7 +81,7 @@ func awsSnapDBE2EFixtureFromEnv(t *testing.T) awsSnapDBE2EFixture {
 	manager := awsprovider.New(cfg)
 
 	f := awsSnapDBE2EFixture{state: state, manager: manager}
-	usePublic := true
+	usePublic := state.Bastion == nil
 	for _, saved := range state.Instances {
 		if saved.PublicIPv4 == "" {
 			usePublic = false
@@ -94,6 +98,13 @@ func awsSnapDBE2EFixtureFromEnv(t *testing.T) awsSnapDBE2EFixture {
 		}
 		require.NotEmpty(t, ip, "%s has no reachable IP", saved.Name)
 		f.endpoints = append(f.endpoints, "http://"+ip+":2379")
+	}
+	if state.Bastion != nil {
+		// Replace the direct member URLs with loopback endpoints that the SSM
+		// port-forwarding sessions relay through the bastion. Everything else
+		// (failpoints, journald, the sysrq hard crash) already runs over SSM
+		// RunCommand and is unaffected.
+		f.endpoints = startAWSBastionTunnels(t, state)
 	}
 	return f
 }
@@ -153,10 +164,14 @@ func awsE2EReinstallMember(t *testing.T, ctx context.Context, f awsSnapDBE2EFixt
 			command[i] = "existing"
 		}
 	}
-	awsE2ERun(t, ctx, target, `
+	// The setup/teardown script runs BEFORE the wipe: the ext2 teardown must
+	// umount the crash-dirty loop filesystem first — deleting files on it
+	// fails with "Structure needs cleaning" — and the ext2 setup must mount
+	// before the wipe so the wipe no-ops on the fresh empty filesystem
+	// instead of racing the mount.
+	awsE2ERun(t, ctx, target, setupScript+`
 find `+awsE2EDataDir+` -mindepth 1 -delete
 install -d -m 0700 `+awsE2EDataDir+`
-`+setupScript+`
 rm -f /etc/systemd/system/etcd-infra.service.d/gofail.conf
 cat > /etc/systemd/system/etcd-infra.service <<'EOF'
 [Unit]
@@ -223,6 +238,26 @@ cat > /etc/systemd/system/etcd-infra.service.d/gofail.conf <<'EOF'
 `+awsE2EGofailDropIn(failpointTerms)+`EOF
 systemctl daemon-reload
 systemctl restart `+awsE2EService)
+}
+
+// awsE2EDisarmFailpointOnCleanup disarms any armed failpoint at test end,
+// even on failure: the drop-in re-arms on every restart, so a suite abort
+// with the cluster left up would poison later runs. Best-effort: a failed
+// cleanup must not mask the test's own failure.
+func awsE2EDisarmFailpointOnCleanup(t *testing.T, instance compute.Instance) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, err := instance.RunCommandWithOptions(
+			ctx,
+			[]string{"bash", "-ceu", "rm -f /etc/systemd/system/etcd-infra.service.d/gofail.conf; systemctl daemon-reload; systemctl restart " + awsE2EService + " || true"},
+			&compute.RunCommandOptions{Timeout: time.Minute},
+		)
+		if err != nil {
+			t.Logf("cleanup: disarm failpoint on %s: %v", instance.ID(), err)
+		}
+	})
 }
 
 // awsE2EDisarmFailpoint removes the failpoint drop-in and restarts etcd.
@@ -295,20 +330,51 @@ func awsE2EHardCrash(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, i
 	}, 5*time.Minute, 5*time.Second, "instance %s never rebooted (boot ID unchanged)", instance.ID())
 }
 
-func awsE2EJournal(t *testing.T, ctx context.Context, instance compute.Instance, currentBootOnly bool) string {
+// awsE2EJournalGrep returns the journal lines matching pattern. The grep
+// runs on the instance because SSM GetCommandInvocation truncates command
+// output at 24KB: after a few boots the full journal exceeds the cap and the
+// truncation drops the newest lines — exactly the ones the tests wait on —
+// and makes absence assertions silently worthless.
+func awsE2EJournalGrep(t *testing.T, ctx context.Context, instance compute.Instance, currentBootOnly bool, pattern string) string {
 	t.Helper()
 	args := "journalctl -u " + awsE2EService + " --no-pager"
 	if currentBootOnly {
 		args += " -b"
 	}
-	return awsE2ERun(t, ctx, instance, args).Stdout
+	return awsE2ERun(t, ctx, instance, args+" | grep -F -- "+shell.Quote(pattern)+" || true").Stdout
 }
 
 func waitForAWSJournal(t *testing.T, ctx context.Context, instance compute.Instance, substr string, currentBootOnly bool) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		return strings.Contains(awsE2EJournal(t, ctx, instance, currentBootOnly), substr)
+		return strings.TrimSpace(awsE2EJournalGrep(t, ctx, instance, currentBootOnly, substr)) != ""
 	}, 150*time.Second, 2*time.Second, "%s never logged %q", instance.ID(), substr)
+}
+
+// awsE2ETimestamp returns the instance's local time in journalctl --since
+// format. Captured on the instance itself so clock skew with the test host
+// cannot shift the window.
+func awsE2ETimestamp(t *testing.T, ctx context.Context, instance compute.Instance) string {
+	t.Helper()
+	return strings.TrimSpace(awsE2ERun(t, ctx, instance, "date '+%Y-%m-%d %H:%M:%S'").Stdout)
+}
+
+// awsE2EJournalGrepSince matches journal lines newer than a timestamp
+// captured before the triggering action. Members are reused across tests and
+// across service restarts within one machine boot, so neither the all-boots
+// journal nor "-b" can separate a fresh snapshot from an earlier one; only a
+// time window can.
+func awsE2EJournalGrepSince(t *testing.T, ctx context.Context, instance compute.Instance, since, pattern string) string {
+	t.Helper()
+	args := "journalctl -u " + awsE2EService + " --no-pager --since " + shell.Quote(since)
+	return awsE2ERun(t, ctx, instance, args+" | grep -F -- "+shell.Quote(pattern)+" || true").Stdout
+}
+
+func waitForAWSJournalSince(t *testing.T, ctx context.Context, instance compute.Instance, substr, since string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return strings.TrimSpace(awsE2EJournalGrepSince(t, ctx, instance, since, substr)) != ""
+	}, 150*time.Second, 2*time.Second, "%s never logged %q after %s", instance.ID(), substr, since)
 }
 
 func awsE2ESnapDBFiles(t *testing.T, ctx context.Context, instance compute.Instance) []string {
@@ -328,24 +394,70 @@ func waitForAWSSnapDBFile(t *testing.T, ctx context.Context, instance compute.In
 // compacted log and restarts its etcd, so the leader must stream it a
 // snapshot: stop the etcd service, advance the cluster past snapshot-count
 // plus snapshot-catchup entries, compact, then start the service again.
+//
+// The leader snapshots on its own apply loop, so a single round can lose the
+// race: the member reconnects before the leader's snapshotter compacts the
+// raft log past the member's position and catches up from plain entries
+// (observed on EC2: a member 26 entries behind caught up from the log). Each
+// round pushes the leader another snapshot-count plus catchup-entries ahead
+// of the still-stopped member, so a bounded retry converges
+// deterministically.
 func awsE2EDriveSnapshotToMember(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, cli *clientv3.Client, idx int) {
 	t.Helper()
-	awsE2EStopEtcd(t, ctx, f.instances[idx])
+	awsE2EDriveSnapshot(t, ctx, f, cli, idx, nil, "")
+}
 
-	var revision int64
-	for i := 0; i < snapDBSnapshotKeys; i++ {
-		putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		resp, err := cli.Put(putCtx, fmt.Sprintf("/etcd-infra-e2e/snapdb/%s/%06d", f.state.Instances[idx].Name, i), "payload")
+// awsE2EDriveSnapshot drives a snapshot to the member with bounded retry.
+// probe confirms the arrival: nil means "a snap.db file exists" (the save
+// completed or is paused mid-apply). DirSyncError instead probes for the
+// injected-failure journal line, because there the save fails by design and
+// no durable snap.db may exist.
+func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, cli *clientv3.Client, idx int, probe func() bool, probeDesc string) {
+	t.Helper()
+	target := f.instances[idx]
+	if probe == nil {
+		probe = func() bool { return len(awsE2ESnapDBFiles(t, ctx, target)) > 0 }
+		probeDesc = "a snapshot db"
+	}
+
+	for round := 1; ; round++ {
+		awsE2EStopEtcd(t, ctx, target)
+		// Drop interrupted-save artifacts before the freshness check, every
+		// round: a completed apply renames snap.db to .snap, so a *.snap.db
+		// present while etcd is stopped is by definition stale, and the file
+		// probe must only ever match a snapshot from this round.
+		awsE2ERun(t, ctx, target, "rm -f "+awsE2EDataDir+"/member/snap/*.snap.db")
+		var revision int64
+		for i := 0; i < snapDBSnapshotKeys; i++ {
+			putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			resp, err := cli.Put(putCtx, fmt.Sprintf("/etcd-infra-e2e/snapdb/%s/%06d", f.state.Instances[idx].Name, i), "payload")
+			cancel()
+			require.NoError(t, err)
+			revision = resp.Header.Revision
+		}
+		compactCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err := cli.Compact(compactCtx, revision)
 		cancel()
 		require.NoError(t, err)
-		revision = resp.Header.Revision
-	}
-	compactCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_, err := cli.Compact(compactCtx, revision)
-	cancel()
-	require.NoError(t, err)
 
-	awsE2EStartEtcd(t, ctx, f.instances[idx])
+		awsE2EStartEtcd(t, ctx, target)
+
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) {
+			if probe() {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("context done while waiting for %s on %s: %v", probeDesc, target.ID(), ctx.Err())
+			case <-time.After(2 * time.Second):
+			}
+		}
+		if round == 3 {
+			t.Fatalf("%s: no %s after %d rounds", target.ID(), probeDesc, round)
+		}
+		t.Logf("no snapshot streamed in round %d (member caught up from the leader's log); driving further ahead", round)
+	}
 }
 
 func awsE2EWaitMemberHealthy(t *testing.T, ctx context.Context, cli *clientv3.Client, endpoint string) {
@@ -402,9 +514,13 @@ func TestSnapDBReceiveCrashWindowAWSE2E(t *testing.T) {
 	cli := newAWSSnapDBE2EClient(t, f.endpoints)
 	targetIdx := len(f.instances) - 1
 	target := f.instances[targetIdx]
+	// journald persists across suite runs on the root volume; scope the
+	// absence assertion to this test so a previous run's panic cannot fail it.
+	sinceTestStart := awsE2ETimestamp(t, ctx, target)
 
 	t.Log("arm the crash window from process boot (snapDBRenameBeforeDirSync=sleep(30s))")
 	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=snapDBRenameBeforeDirSync=sleep("30s")`)
+	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
@@ -417,10 +533,16 @@ func TestSnapDBReceiveCrashWindowAWSE2E(t *testing.T) {
 	awsE2EKillEtcd(t, ctx, target)
 
 	t.Log("start etcd; with no WAL snapshot record it must boot cleanly and receive the snapshot again")
+	sinceStart := awsE2ETimestamp(t, ctx, target)
 	awsE2EStartEtcd(t, ctx, target)
-	waitForAWSJournal(t, ctx, target, "saved database snapshot to disk", false)
+	// The resend reuses the same snapshot id (no entries commit between the
+	// kill and the resend), so SaveDBFrom takes its idempotent path, which
+	// skips the "saved database snapshot to disk" line. The rafthttp handler
+	// line is emitted on both save paths, and the killed first attempt never
+	// reached it (SaveDBFrom never returned), so it is unambiguous.
+	waitForAWSJournalSince(t, ctx, target, "received and saved database snapshot", sinceStart)
 	assertAWSKVHashEqual(t, ctx, f, cli)
-	require.NotContains(t, awsE2EJournal(t, ctx, target, false), "failed to find database snapshot file")
+	require.Empty(t, awsE2EJournalGrepSince(t, ctx, target, sinceTestStart, "failed to find database snapshot file"))
 	awsE2EDisarmFailpoint(t, ctx, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 	t.Logf("%s survived a SIGKILL inside the SaveDBFrom crash window and caught up via resend", f.state.Instances[targetIdx].Name)
@@ -441,25 +563,45 @@ func TestSnapDBDirSyncErrorAWSE2E(t *testing.T) {
 
 	t.Log("arm the fsync failure from process boot (snapDBDirSyncError=return(...))")
 	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=snapDBDirSyncError=return("injected snap dir fsync failure")`)
+	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
-	awsE2EDriveSnapshotToMember(t, ctx, f, cli, targetIdx)
+	sinceDrive := awsE2ETimestamp(t, ctx, target)
+	awsE2EDriveSnapshot(t, ctx, f, cli, targetIdx, func() bool {
+		// The injected failure makes every save fail, so no durable snap.db
+		// may exist; the snapshot's arrival is the handler's error line.
+		return strings.TrimSpace(awsE2EJournalGrepSince(t, ctx, target, sinceDrive, "failed to save incoming database snapshot")) != ""
+	}, "failed-save signal")
 
 	t.Log("the injected fsync failure must surface loudly")
 	// The injected failpoint returns before the fsyncSnapDir Warn log line,
 	// so the signal is the rafthttp handler's error carrying the injected
 	// fsync failure message.
-	waitForAWSJournal(t, ctx, target, "failed to save incoming database snapshot", false)
-	waitForAWSJournal(t, ctx, target, "injected snap dir fsync failure", false)
+	waitForAWSJournalSince(t, ctx, target, "failed to save incoming database snapshot", sinceDrive)
+	waitForAWSJournalSince(t, ctx, target, "injected snap dir fsync failure", sinceDrive)
 
 	t.Log("clear the failure on the running process; the leader resends and the member catches up")
-	// The resend for the same snapshot id takes the idempotent path in
-	// SaveDBFrom (the interrupted attempt left the renamed snap.db behind),
-	// which fsyncs the directory but skips the "saved database snapshot to
-	// disk" log line, so the recovery signal is the rafthttp handler's line.
+	// The interrupted attempt left the renamed snap.db behind, and the resend
+	// for the same snapshot id would take SaveDBFrom's idempotent path, which
+	// bypasses the snapDBDirSyncError failpoint — a silent no-op clear would
+	// still "recover". Remove the orphan first so the resend must take the
+	// rename path through the failpoint: if the clear did nothing, the save
+	// fails again and the wait times out loudly.
+	awsE2ERun(t, ctx, target, "rm -f "+awsE2EDataDir+"/member/snap/*.snap.db")
+	sinceClear := awsE2ETimestamp(t, ctx, target)
 	awsE2EClearFailpoint(t, ctx, target, "snapDBDirSyncError")
-	waitForAWSJournal(t, ctx, target, "received and saved database snapshot", false)
+	// Restart so the member reconnects fresh: the failed save broke its
+	// receive stream, and the leader's snapshot resend cadence is not
+	// prompt or guaranteed. With the failpoint cleared the member then
+	// converges — by resend-snapshot or by log entries — and any save that
+	// does run after the clear must succeed: a silent no-op clear would
+	// print the failure line again and fail the absence check loudly.
+	awsE2EStopEtcd(t, ctx, target)
+	awsE2EStartEtcd(t, ctx, target)
+	assertAWSKVHashEqual(t, ctx, f, cli)
+	require.Empty(t, awsE2EJournalGrepSince(t, ctx, target, sinceClear, "injected snap dir fsync failure"),
+		"the snap dir fsync failpoint fired again after it was cleared")
 	assertAWSKVHashEqual(t, ctx, f, cli)
 	awsE2EDisarmFailpoint(t, ctx, target)
 	t.Logf("%s reported the snap dir fsync failure loudly and recovered via resend", f.state.Instances[targetIdx].Name)
@@ -482,13 +624,15 @@ func TestSnapDBDirentLostAWSE2E(t *testing.T) {
 
 	t.Log("arm apply to pause before consuming the snap.db (applyBeforeOpenSnapshot=sleep(60s))")
 	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=applyBeforeOpenSnapshot=sleep("60s")`)
+	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
+	sinceDrive := awsE2ETimestamp(t, ctx, target)
 	awsE2EDriveSnapshotToMember(t, ctx, f, cli, targetIdx)
 
 	t.Log("wait until the snap.db rename is done and applySnapshot is paused before consuming it")
-	waitForAWSJournal(t, ctx, target, "applying snapshot", false)
+	waitForAWSJournalSince(t, ctx, target, "applying snapshot", sinceDrive)
 	waitForAWSSnapDBFile(t, ctx, target)
 	// The failpoint sleep dominates the millisecond gap between the "applying
 	// snapshot" log line and the WAL snapshot record sync; two seconds in, the
@@ -503,11 +647,12 @@ func TestSnapDBDirentLostAWSE2E(t *testing.T) {
 	awsE2ERun(t, ctx, target, "rm -f "+awsE2EDataDir+"/member/snap/*.snap.db")
 
 	t.Log("start etcd; bootstrap finds the WAL snapshot record, cannot find snap.db, and must fail loudly")
+	sinceStart := awsE2ETimestamp(t, ctx, target)
 	awsE2EStartEtcd(t, ctx, target)
 	// systemd (Restart=on-failure) restarts etcd into the same panic, so the
 	// member crash-loops and never serves: the blast radius is this one
 	// member's availability, never cluster data.
-	waitForAWSJournal(t, ctx, target, "failed to find database snapshot file", false)
+	waitForAWSJournalSince(t, ctx, target, "failed to find database snapshot file", sinceStart)
 	t.Logf("%s failed loudly on the lost snap.db directory entry, as in field reports #11949/#14497/#14569", targetName)
 
 	t.Log("remediate as documented: wipe the member's data dir and re-add it to the cluster")
@@ -551,13 +696,15 @@ func TestSnapDBHardPowerLossAWSE2E(t *testing.T) {
 
 	t.Log("arm apply to pause before consuming the snap.db (applyBeforeOpenSnapshot=sleep(60s))")
 	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=applyBeforeOpenSnapshot=sleep("60s")`)
+	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
+	sinceDrive := awsE2ETimestamp(t, ctx, target)
 	awsE2EDriveSnapshotToMember(t, ctx, f, cli, targetIdx)
 
 	t.Log("wait until the snap.db rename is done and the WAL snapshot record is durable")
-	waitForAWSJournal(t, ctx, target, "applying snapshot", false)
+	waitForAWSJournalSince(t, ctx, target, "applying snapshot", sinceDrive)
 	waitForAWSSnapDBFile(t, ctx, target)
 	time.Sleep(2 * time.Second)
 
@@ -567,9 +714,8 @@ func TestSnapDBHardPowerLossAWSE2E(t *testing.T) {
 	t.Log("after reboot the member must boot from the durable snap.db and rejoin")
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 	assertAWSKVHashEqual(t, ctx, f, cli)
-	bootJournal := awsE2EJournal(t, ctx, target, true)
-	require.NotContains(t, bootJournal, "failed to find database snapshot file")
-	require.Contains(t, bootJournal, "Recovering from snapshot")
+	require.Empty(t, awsE2EJournalGrep(t, ctx, target, true, "failed to find database snapshot file"))
+	require.NotEmpty(t, awsE2EJournalGrep(t, ctx, target, true, "Recovering from snapshot"))
 	awsE2EDisarmFailpoint(t, ctx, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 	t.Logf("%s booted from the fsynced snap.db after a real machine crash", f.state.Instances[targetIdx].Name)
@@ -623,17 +769,33 @@ func awsE2EHardPowerLossNoJournal(t *testing.T, expectPanic bool) {
 
 	t.Log("reinstall the member with its data dir on a non-journaled (ext2) filesystem")
 	awsE2EReinstallMember(t, ctx, f, cli, targetIdx, awsE2EExt2Setup)
+	// A mid-test failure would leave the crash-dirty loop mount and its fstab
+	// entry, remounting a stale non-journaled filesystem at every later boot.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, err := target.RunCommandWithOptions(
+			ctx,
+			[]string{"bash", "-ceu", "systemctl stop " + awsE2EService + " || true; umount /var/lib/etcd 2>/dev/null || true; sed -i '\\#etcd-data.img#d' /etc/fstab; rm -f /var/lib/etcd-data.img"},
+			&compute.RunCommandOptions{Timeout: time.Minute},
+		)
+		if err != nil {
+			t.Logf("cleanup: ext2 teardown on %s: %v", target.ID(), err)
+		}
+	})
 	assertAWSKVHashEqual(t, ctx, f, cli)
 
 	t.Log("arm apply to pause before consuming the snap.db (applyBeforeOpenSnapshot=sleep(60s))")
 	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=applyBeforeOpenSnapshot=sleep("60s")`)
+	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
+	sinceDrive := awsE2ETimestamp(t, ctx, target)
 	awsE2EDriveSnapshotToMember(t, ctx, f, cli, targetIdx)
 
 	t.Log("wait until the snap.db rename is done and the WAL snapshot record is durable")
-	waitForAWSJournal(t, ctx, target, "applying snapshot", false)
+	waitForAWSJournalSince(t, ctx, target, "applying snapshot", sinceDrive)
 	waitForAWSSnapDBFile(t, ctx, target)
 	time.Sleep(2 * time.Second)
 
@@ -648,9 +810,8 @@ func awsE2EHardPowerLossNoJournal(t *testing.T, expectPanic bool) {
 		t.Log("fixed build: the directory fsync put the entry on EBS, so the member must boot from the snap.db")
 		awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 		assertAWSKVHashEqual(t, ctx, f, cli)
-		bootJournal := awsE2EJournal(t, ctx, target, true)
-		require.NotContains(t, bootJournal, "failed to find database snapshot file")
-		require.Contains(t, bootJournal, "Recovering from snapshot")
+		require.Empty(t, awsE2EJournalGrep(t, ctx, target, true, "failed to find database snapshot file"))
+		require.NotEmpty(t, awsE2EJournalGrep(t, ctx, target, true, "Recovering from snapshot"))
 		t.Logf("%s booted from the fsynced snap.db on a non-journaled filesystem after a real machine crash", targetName)
 	}
 
