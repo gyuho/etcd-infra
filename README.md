@@ -161,7 +161,13 @@ URLs; the scripts already require `AWS_REGION`.
 ## Client selection
 
 Tests use the published etcd v3.7.1 client by default. Set `ETCD_INFRA_CLIENT=custom`
-to use the temporary copy in `client/v3` with leader-aware mutation routing:
+to import the leader-aware client from the fork branch
+[`leader-aware-client-balancer`](https://github.com/gyuho/etcd/commits/leader-aware-client-balancer/)
+(`go.custom.mod` replaces `go.etcd.io/etcd/client/v3` with
+`github.com/gyuho/etcd/client/v3` at a pinned commit, and tracks etcd main
+pseudo-versions for `api/v3` and `client/pkg/v3` because the fork's client
+needs the Masterminds semver migration that predates the published
+v3.8.0-alpha.0 tag):
 
 ```bash
 ./hack/unit.sh
@@ -170,7 +176,7 @@ ETCD_INFRA_CLIENT=custom ./hack/unit.sh
 ETCD_INFRA_CLIENT=custom ./hack/e2e.sh
 ```
 
-The custom module is a drop-in `go.etcd.io/etcd/client/v3` replacement. Its Go
+The fork module is a drop-in `go.etcd.io/etcd/client/v3` replacement. Its Go
 API uses `clientv3.DefaultBalancerName` (`round_robin`) unless it is overwritten
 with the namespaced `clientv3.LeaderAwareBalancerName` (`etcd_leader_aware`):
 
@@ -190,7 +196,7 @@ and revoke, auth administration including `Authenticate`, and `Alarm`.
 `MoveLeader` also uses leader-aware routing because only the leader serves it; a follower
 rejects it with `ErrNotLeader`. Reads, watches, lease keep-alives, and
 member-local maintenance stay on `round_robin`; `isMutationRequest` in
-`client/v3/leader_routing.go` documents each per-type decision.
+`client/v3/leader_routing.go` in the fork documents each per-type decision.
 Applications can tune the freshness/load trade-off when needed:
 
 ```go

@@ -7,8 +7,8 @@ go 1.26.1
 require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/time v0.15.0
-	google.golang.org/grpc v1.82.1
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/grpc v1.83.0
+	google.golang.org/protobuf v1.36.12
 )
 
 // Cloud provider SDKs.
@@ -34,8 +34,8 @@ require (
 // Etcd storage and clients.
 require (
 	go.etcd.io/bbolt v1.5.0
-	go.etcd.io/etcd/api/v3 v3.7.1
-	go.etcd.io/etcd/client/pkg/v3 v3.7.1
+	go.etcd.io/etcd/api/v3 v3.8.0-alpha.0.0.20260820141315-c34dc7ee0048
+	go.etcd.io/etcd/client/pkg/v3 v3.8.0-alpha.0.0.20260820141315-c34dc7ee0048
 	go.etcd.io/etcd/client/v3 v3.7.1
 )
 
@@ -60,13 +60,13 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260727163830-6c54dddc4772 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260727163830-6c54dddc4772 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -76,6 +76,7 @@ require (
 )
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.32 // indirect
 	github.com/gopherjs/gopherjs v1.21.0 // indirect
 	github.com/jtolds/gls v4.20.0+incompatible // indirect
@@ -84,4 +85,4 @@ require (
 	golang.org/x/arch v0.29.0 // indirect
 )
 
-replace go.etcd.io/etcd/client/v3 => ./client/v3
+replace go.etcd.io/etcd/client/v3 => github.com/gyuho/etcd/client/v3 v3.0.0-20260821090745-59f6ecbcf129

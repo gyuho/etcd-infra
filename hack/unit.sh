@@ -185,12 +185,4 @@ run_unit_tests() {
 
 run_unit_tests
 
-if [[ "$client_mode" == "custom" && ${#requested_packages[@]} -eq 0 ]]; then
-    log_step "Testing copied etcd client"
-    (
-        cd "$PROJECT_ROOT/client/v3"
-        GOFLAGS="-buildvcs=false" go test -race ./...
-    )
-fi
-
 echo "All unit tests passed successfully."
