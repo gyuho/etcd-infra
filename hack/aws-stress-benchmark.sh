@@ -45,7 +45,9 @@ cleanup() {
         || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     rm -rf "${tmpdir}"
 }
-trap cleanup EXIT
+# bash 3.2 leaks the trap's last command status over the failing status;
+# capture and re-exit so the caller sees the real result.
+trap 'rc=$?; cleanup; exit $rc' EXIT
 
 # Build both binaries up front so nothing rebuilds between legs.
 ETCD_INFRA_CLIENT=official "${project_root}/hack/build.sh"
@@ -100,13 +102,14 @@ total_sent() { awk '/^TOTAL/ {print $2}' "$1"; }
 run_leg() {
     local label="$1" rep="$2" binary="${tmpdir}/etcd-infra-$3"
     "${binary}" metrics --endpoints "${endpoints}" > "${tmpdir}/${label}-${rep}-before.txt"
+    # bash 3.2 (macOS) rejects an empty array expansion under set -u.
     local scenario_args=()
     if [[ -n "${ETCD_INFRA_BENCH_SCENARIOS:-}" ]]; then
         scenario_args+=(--scenario "${ETCD_INFRA_BENCH_SCENARIOS}")
     fi
     ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
     "${binary}" stress --endpoints "${endpoints}" \
-        "${scenario_args[@]}" \
+        ${scenario_args[@]+"${scenario_args[@]}"} \
         --duration "${ETCD_INFRA_AWS_STRESS_DURATION:-90}" \
         --workers "${ETCD_INFRA_AWS_STRESS_WORKERS:-10}" \
         --rps "${ETCD_INFRA_AWS_STRESS_RPS:-100}" \

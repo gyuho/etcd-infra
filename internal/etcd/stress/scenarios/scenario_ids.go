@@ -74,4 +74,8 @@ const (
 	// K8sMixedApiserver composes the kube-apiserver shape: informer fan-out, steady reads,
 	// bursty pod churn, and node lease renewals concurrently.
 	K8sMixedApiserver
+	// K8sCRDHeavyChurn staging/src/k8s.io/apiextensions-apiserver
+	// Large CRD objects (OpenAPI validation schemas, tens to hundreds of KB) churned
+	// with informer watches — the payload shape of CRD-heavy clusters.
+	K8sCRDHeavyChurn
 )
