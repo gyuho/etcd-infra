@@ -7,10 +7,13 @@ first_port=32379
 endpoints="http://127.0.0.1:32379,http://127.0.0.1:32380,http://127.0.0.1:32381"
 
 tmpdir="$(mktemp -d)"
-cleanup() {
+teardown_cluster() {
     if [[ -x "${tmpdir}/etcd-infra" ]]; then
         "${tmpdir}/etcd-infra" local down --name "${cluster}" >/dev/null 2>&1 || true
     fi
+}
+cleanup() {
+    teardown_cluster
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
@@ -46,8 +49,8 @@ fi
 
 "${project_root}/hack/build.sh"
 # A private copy: a concurrently running suite rebuilds bin/etcd-infra.
-cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
-cleanup
+cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
+teardown_cluster
 "${tmpdir}/etcd-infra" local up --name "${cluster}" --members 3 --port "${first_port}"
 "${tmpdir}/etcd-infra" conformance --endpoints "${endpoints}" --scenario CLUSTER_MEMBER_LIST
 if [[ "${ETCD_INFRA_CLIENT:-official}" == "custom" ]]; then

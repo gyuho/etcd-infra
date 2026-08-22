@@ -89,7 +89,7 @@ trap cleanup EXIT
 ETCD_INFRA_SNAPDB_ARCH=amd64 "${project_root}/hack/snapdb/build.sh"
 "${project_root}/hack/build.sh"
 # A private copy: a concurrently running suite rebuilds bin/etcd-infra.
-cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
+cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
 
 # upload prints "<sha256> <presigned-url>" for one flavor's binary.
 upload() {

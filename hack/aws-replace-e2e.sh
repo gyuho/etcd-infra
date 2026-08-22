@@ -37,18 +37,21 @@ command -v aws >/dev/null 2>&1 || { echo "the AWS CLI is required" >&2; exit 2; 
 command -v session-manager-plugin >/dev/null 2>&1 || { echo "session-manager-plugin is required: the tests reach the members over SSM port-forwarding through the bastion" >&2; exit 2; }
 
 tmpdir="$(mktemp -d)"
-cleanup() {
+teardown_cluster() {
     if [[ -x "${tmpdir}/etcd-infra" ]]; then
         "${tmpdir}/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     fi
+}
+cleanup() {
+    teardown_cluster
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
 
 "${project_root}/hack/build.sh"
 # A private copy: a concurrently running suite rebuilds bin/etcd-infra.
-cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
-cleanup
+cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
+teardown_cluster
 
 up_args=(
     --name "${cluster}" --members 3 --bastion --replaceable

@@ -64,7 +64,7 @@ trap cleanup EXIT
 "${project_root}/hack/build.sh"
 # A private copy: a concurrently running suite (local or AWS) rebuilds
 # bin/etcd-infra, and a mid-leg swap silently changes the client under test.
-cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
+cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
 # Remove any stale cluster with the same name without tearing down tmpdir.
 "${tmpdir}/etcd-infra" aws down --name "${cluster}" >/dev/null 2>&1 || true
 

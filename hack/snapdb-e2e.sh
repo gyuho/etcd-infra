@@ -13,10 +13,13 @@ first_port=33379
 gofail_port=33479
 
 tmpdir="$(mktemp -d)"
-cleanup() {
+teardown_cluster() {
     if [[ -x "${tmpdir}/etcd-infra" ]]; then
         "${tmpdir}/etcd-infra" local down --name "${cluster}" >/dev/null 2>&1 || true
     fi
+}
+cleanup() {
+    teardown_cluster
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
@@ -53,7 +56,7 @@ fi
 "${project_root}/hack/snapdb/build.sh"
 "${project_root}/hack/build.sh"
 # A private copy: a concurrently running suite rebuilds bin/etcd-infra.
-cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
+cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
 
 run_case() {
     local flavor="$1" test="$2" failpoints="$3"
@@ -65,7 +68,7 @@ run_case() {
     if [[ -n "${failpoints}" ]]; then
         env="${env},GOFAIL_FAILPOINTS=${failpoints}"
     fi
-    cleanup
+    teardown_cluster
     "${tmpdir}/etcd-infra" local up --name "${cluster}" --members 3 --port "${first_port}" \
         --image "${image}" \
         --extra-args "--snapshot-count=10 --snapshot-catchup-entries=10 --log-level=info" \
