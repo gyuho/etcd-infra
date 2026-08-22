@@ -65,7 +65,7 @@ run_flavor() {
     local sha="${out%% *}" url="${out#* }"
 
     local up_args=(
-        --name "${name}" --members 3 --stress-clients 1 --replaceable
+        --name "${name}" --members 3 --stress-clients 1
         --vpc "${ETCD_INFRA_AWS_VPC}"
         --ami "${ETCD_INFRA_AWS_AMI}"
         --instance-profile "${ETCD_INFRA_AWS_INSTANCE_PROFILE}"

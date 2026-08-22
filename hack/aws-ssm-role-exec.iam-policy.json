@@ -89,6 +89,15 @@
       "Resource": "*"
     },
     {
+      "Sid": "PassOwnRoleForRelaunch",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/etcd-infra-ssm",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" }
+      }
+    },
+    {
       "Sid": "S3ResultsAndBinaryPrefix",
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject"],
