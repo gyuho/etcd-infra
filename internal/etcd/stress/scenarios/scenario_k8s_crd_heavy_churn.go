@@ -71,9 +71,11 @@ func RunK8sCRDHeavyChurn(runner StressRunner) {
 	}
 
 	// CRD churn workers: large values — 64KB typical, 256KB for the biggest
-	// validation schemas. The slow-path multiplier covers large-value latency
-	// budgets on high-latency links.
-	workers := max(workerCount(cfg), 2)
+	// validation schemas. CRD churn is a lifecycle workload like pod churn:
+	// even operator storms install CRDs at ~1/s, so the writers are capped
+	// and paced — the scenario's point is the payload size, not the rate.
+	// (The throughput-flood scenarios own raw scale.)
+	workers := min(max(workerCount(cfg), 2), 4)
 	errs := runWorkers(workers, func(workerID int, _ chan<- error) {
 		for time.Now().Before(deadline) {
 			key := fmt.Sprintf("%s/crd-%04d", prefix, randutil.Intn(50))
@@ -113,7 +115,7 @@ func RunK8sCRDHeavyChurn(runner StressRunner) {
 			}
 			cancel()
 
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 	})
 
