@@ -48,8 +48,11 @@ import (
 // otherwise private IPs, so run from a network with VPC access or allow the
 // test host in the security group.
 const (
-	awsE2EClusterEnv   = "ETCD_INFRA_AWS_E2E_CLUSTER"
-	awsE2EFlavorEnv    = "ETCD_INFRA_AWS_E2E_FLAVOR"
+	awsE2EClusterEnv = "ETCD_INFRA_AWS_E2E_CLUSTER"
+	awsE2EFlavorEnv  = "ETCD_INFRA_AWS_E2E_FLAVOR"
+	// awsE2EStateEnv points at a cluster state file directly; "aws drive"
+	// sets it when it ships the state to the stress client.
+	awsE2EStateEnv     = "ETCD_INFRA_AWS_E2E_STATE"
 	awsE2EService      = "etcd-infra.service"
 	awsE2EDataDir      = "/var/lib/etcd"
 	awsE2EGofailAddr   = "http://127.0.0.1:2234"
@@ -63,15 +66,42 @@ type awsSnapDBE2EFixture struct {
 	endpoints []string
 }
 
+// awsE2EStatePath resolves the state file path: ETCD_INFRA_AWS_E2E_STATE
+// when set (on-bastion runs), else the state directory for the cluster name.
+// The replace flow writes updates back to this path; "aws drive" ships the
+// file to the stress client and uploads the updated copy back to S3.
+func awsE2EStatePath(t *testing.T, name string) string {
+	t.Helper()
+	if path := strings.TrimSpace(os.Getenv(awsE2EStateEnv)); path != "" {
+		return path
+	}
+	statePath, err := awsStatePath(name)
+	require.NoError(t, err)
+	return statePath
+}
+
+// awsE2EState loads the cluster state: from the path in
+// ETCD_INFRA_AWS_E2E_STATE when set (on-bastion runs), else from the state
+// directory for the named cluster.
+func awsE2EState(t *testing.T, name string) (awsState, error) {
+	t.Helper()
+	if path := strings.TrimSpace(os.Getenv(awsE2EStateEnv)); path != "" {
+		return readAWSState(path)
+	}
+	statePath, err := awsStatePath(name)
+	if err != nil {
+		return awsState{}, err
+	}
+	return readAWSState(statePath)
+}
+
 func awsSnapDBE2EFixtureFromEnv(t *testing.T) awsSnapDBE2EFixture {
 	t.Helper()
 	name := awsE2EClusterName()
 	if name == "" {
 		t.Skipf("set %s to run the AWS snap.db durability E2E tests", awsE2EClusterEnv)
 	}
-	statePath, err := awsStatePath(name)
-	require.NoError(t, err)
-	state, err := readAWSState(statePath)
+	state, err := awsE2EState(t, name)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -81,31 +111,15 @@ func awsSnapDBE2EFixtureFromEnv(t *testing.T) awsSnapDBE2EFixture {
 	manager := awsprovider.New(cfg)
 
 	f := awsSnapDBE2EFixture{state: state, manager: manager}
-	usePublic := state.Bastion == nil
-	for _, saved := range state.Instances {
-		if saved.PublicIPv4 == "" {
-			usePublic = false
-		}
-	}
 	for _, saved := range state.Instances {
 		instance, err := manager.Get(ctx, saved.ID)
 		require.NoError(t, err)
 		require.Equal(t, compute.InstanceStateRunning, instance.State(), "%s is not running", saved.Name)
 		f.instances = append(f.instances, instance)
-		ip := instance.PrivateIPv4()
-		if usePublic {
-			ip = instance.PublicIPv4()
-		}
-		require.NotEmpty(t, ip, "%s has no reachable IP", saved.Name)
-		f.endpoints = append(f.endpoints, "http://"+ip+":2379")
 	}
-	if state.Bastion != nil {
-		// Replace the direct member URLs with loopback endpoints that the SSM
-		// port-forwarding sessions relay through the bastion. Everything else
-		// (failpoints, journald, the sysrq hard crash) already runs over SSM
-		// RunCommand and is unaffected.
-		f.endpoints = startAWSBastionTunnels(t, state)
-	}
+	// Direct VPC endpoints: the suites run on the cluster's stress clients,
+	// which share the members' VPC and security groups.
+	f.endpoints = awsE2EMemberEndpoints(t, state)
 	return f
 }
 

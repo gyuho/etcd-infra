@@ -139,8 +139,7 @@ func TestAWSReplaceLeaderHandoffAWSE2E(t *testing.T) {
 	leaderEtcdID := awsE2EMemberID(t, ctx, cli, leaderName)
 	t.Logf("replacing leader %s (%s)", leaderName, leaderMachineID)
 
-	statePath, err := awsStatePath(f.state.Name)
-	require.NoError(t, err)
+	statePath := awsE2EStatePath(t, f.state.Name)
 
 	outcome := make(chan replaceOutcome, 1)
 	go func() {
@@ -227,8 +226,7 @@ func TestAWSReplaceFollowerAWSE2E(t *testing.T) {
 	leaderEtcdID := awsE2EMemberID(t, ctx, cli, f.state.Instances[leaderIdx].Name)
 	t.Logf("replacing follower %s; leader is %s", followerName, f.state.Instances[leaderIdx].Name)
 
-	statePath, err := awsStatePath(f.state.Name)
-	require.NoError(t, err)
+	statePath := awsE2EStatePath(t, f.state.Name)
 
 	outcome := make(chan replaceOutcome, 1)
 	go func() {

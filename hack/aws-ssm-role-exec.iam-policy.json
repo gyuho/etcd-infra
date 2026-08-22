@@ -1,0 +1,98 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EC2ReadOnlyLookups",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeVolumes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ec2:*:*:volume/*"
+      ],
+      "Condition": {
+        "StringEquals": { "ec2:CreateAction": "RunInstances" },
+        "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2RunInstancesTaggedOnly",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2RunInstancesAttachments",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:*:*:volume/*",
+        "arn:aws:ec2:*:*:network-interface/*",
+        "arn:aws:ec2:*:*:subnet/*",
+        "arn:aws:ec2:*:*:security-group/*",
+        "arn:aws:ec2:*:*:image/*",
+        "arn:aws:ec2:*:*:key-pair/*"
+      ]
+    },
+    {
+      "Sid": "EC2TerminateTaggedOnly",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2VolumesForReplace",
+      "Effect": "Allow",
+      "Action": ["ec2:AttachVolume", "ec2:DeleteVolume"],
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ec2:*:*:volume/*"
+      ],
+      "Condition": {
+        "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "SSMSendCommandTaggedInstances",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "Null": { "ssm:resourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "SSMSendCommandShellDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:*::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "SSMReadCommandResults",
+      "Effect": "Allow",
+      "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3ResultsAndBinaryPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::etcd-infra-e2e-*/etcd-infra/*"
+    }
+  ]
+}

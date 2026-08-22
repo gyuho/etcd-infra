@@ -496,44 +496,45 @@ func (m *Manager) waitForVolumeAvailable(ctx context.Context, volumeID string, t
 	}
 }
 
-// DeleteClusterVolumes deletes the tagged data volumes a replaceable cluster
-// leaves behind after its instances terminate. Missing volumes are ignored;
-// volumes still attached are waited out.
-func (m *Manager) DeleteClusterVolumes(ctx context.Context, cluster string) error {
+// DeleteDataVolume deletes one data volume by ID. The caller passes only
+// volumes it created and recorded; this never sweeps by tag. A missing
+// volume is the desired end state and not an error; an attached volume is
+// waited out.
+func (m *Manager) DeleteDataVolume(ctx context.Context, volumeID string) error {
 	if m.ec2 == nil {
 		return errors.New("aws: ec2 client is nil")
 	}
-	cluster = strings.TrimSpace(cluster)
-	if cluster == "" {
-		return errors.New("aws: cluster name is required")
+	volumeID = strings.TrimSpace(volumeID)
+	if volumeID == "" {
+		return errors.New("aws: volume id is required")
 	}
 	out, err := m.ec2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
-		Filters: []types.Filter{{Name: aws.String("tag:etcd-infra.cluster"), Values: []string{cluster}}},
+		VolumeIds: []string{volumeID},
 	})
 	if err != nil {
-		return fmt.Errorf("aws: describe data volumes for cluster %s: %w", cluster, err)
+		if isVolumeNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("aws: describe data volume %s: %w", volumeID, err)
 	}
-	var errs []error
 	for _, volume := range out.Volumes {
-		volumeID := aws.ToString(volume.VolumeId)
-		if volumeID == "" || volume.State == types.VolumeStateDeleted {
+		if aws.ToString(volume.VolumeId) != volumeID || volume.State == types.VolumeStateDeleted {
 			continue
 		}
 		if volume.State != types.VolumeStateAvailable {
 			if err := m.waitForVolumeAvailable(ctx, volumeID, 5*time.Minute); err != nil {
-				errs = append(errs, err)
-				continue
+				return err
 			}
 		}
 		if _, err := m.ec2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volumeID)}); err != nil {
 			// Already gone is the desired end state (a raced retry, or a volume
 			// deleted between the describe and the delete).
 			if !isVolumeNotFoundError(err) {
-				errs = append(errs, fmt.Errorf("aws: delete data volume %s: %w", volumeID, err))
+				return fmt.Errorf("aws: delete data volume %s: %w", volumeID, err)
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // DataVolumeID returns the ID of the instance's dedicated data volume, or ""
@@ -679,23 +680,38 @@ func buildTagSpecifications(op compute.Op) []types.TagSpecification {
 // data volume at launch and reattach.
 const dataVolumeDeviceName = "/dev/xvdf"
 
-// otherSubnetIDs lists the VPC's subnets other than the given one, for
-// capacity failover.
-func (m *Manager) otherSubnetIDs(ctx context.Context, vpcID, current string) []string {
+// SubnetsInVPC lists the VPC's subnets (used to spread driver instances
+// across availability zones).
+func (m *Manager) SubnetsInVPC(ctx context.Context, vpcID string) ([]string, error) {
 	out, err := m.ec2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []types.Filter{{Name: aws.String("vpc-id"), Values: []string{vpcID}}},
 	})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("aws: describe subnets in %s: %w", vpcID, err)
 	}
 	var ids []string
 	for _, subnet := range out.Subnets {
-		id := aws.ToString(subnet.SubnetId)
-		if id != "" && id != current {
+		if id := aws.ToString(subnet.SubnetId); id != "" {
 			ids = append(ids, id)
 		}
 	}
-	return ids
+	return ids, nil
+}
+
+// otherSubnetIDs lists the VPC's subnets other than the given one, for
+// capacity failover.
+func (m *Manager) otherSubnetIDs(ctx context.Context, vpcID, current string) []string {
+	ids, err := m.SubnetsInVPC(ctx, vpcID)
+	if err != nil {
+		return nil
+	}
+	var others []string
+	for _, id := range ids {
+		if id != current {
+			others = append(others, id)
+		}
+	}
+	return others
 }
 
 // isInsufficientCapacityError reports whether the error is EC2's

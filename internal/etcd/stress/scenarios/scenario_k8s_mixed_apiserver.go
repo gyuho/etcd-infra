@@ -118,7 +118,7 @@ func RunK8sMixedApiserver(runner StressRunner) {
 		})
 	})
 
-	// Node lease renewals: one lease per writer interval.
+	// Node lease renewals: one lease per worker, renewed every second.
 	wg.Go(func() {
 		leaseErrs = runWorkers(2, func(workerID int, _ chan<- error) {
 			key := fmt.Sprintf("%s/leases/kube-node-lease/node-%02d", root, workerID)

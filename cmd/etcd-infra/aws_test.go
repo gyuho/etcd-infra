@@ -146,7 +146,7 @@ func TestAWSStateRoundTrip(t *testing.T) {
 		Instances: []awsInstanceState{
 			{Name: "etcd-infra-1", ID: "i-1", PrivateIPv4: "10.0.0.1"},
 		},
-		Bastion: &awsInstanceState{Name: "etcd-infra-bastion", ID: "i-bastion", PrivateIPv4: "10.0.0.9"},
+		StressClients: []awsInstanceState{{Name: "etcd-infra-stress-client-1", ID: "i-stress-1", PrivateIPv4: "10.0.0.9"}},
 	}
 	require.NoError(t, writeAWSState(path, want))
 	got, err := readAWSState(path)
@@ -154,17 +154,17 @@ func TestAWSStateRoundTrip(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func TestAWSStateRoundTripBastionOnly(t *testing.T) {
+func TestAWSStateRoundTripStressClientOnly(t *testing.T) {
 	t.Parallel()
 
 	// A partial "aws down" failure can leave a state with zero members and
-	// only the bastion; it must stay readable so the retry can finish.
+	// only a stress client; it must stay readable so the retry can finish.
 	path := filepath.Join(t.TempDir(), "state.json")
 	want := awsState{
-		Name:    "etcd-infra",
-		Region:  "us-west-1",
-		Version: "3.7.1",
-		Bastion: &awsInstanceState{Name: "etcd-infra-bastion", ID: "i-bastion", PrivateIPv4: "10.0.0.9"},
+		Name:          "etcd-infra",
+		Region:        "us-west-1",
+		Version:       "3.7.1",
+		StressClients: []awsInstanceState{{Name: "etcd-infra-stress-client-1", ID: "i-stress-1", PrivateIPv4: "10.0.0.9"}},
 	}
 	require.NoError(t, writeAWSState(path, want))
 	got, err := readAWSState(path)
@@ -185,16 +185,16 @@ func TestValidateAWSUpOptionsBastionTypeRequiresBastion(t *testing.T) {
 		Members:            3,
 		BastionType:        "t3a.micro",
 	}
-	require.ErrorContains(t, validateAWSUpOptions(opts), "--bastion-instance-type requires --bastion")
-	opts.Bastion = true
+	require.ErrorContains(t, validateAWSUpOptions(opts), "--bastion-instance-type requires --stress-clients > 0")
+	opts.StressClients = 1
 	require.NoError(t, validateAWSUpOptions(opts))
 }
 
 func TestDefaultBastionInstanceType(t *testing.T) {
 	t.Parallel()
 
-	// The relay shuttles low-rate TCP streams only; the nano tier matches
-	// that load and must stay on the AMI's architecture.
-	assert.Equal(t, "t3a.nano", defaultBastionInstanceType("amd64"))
-	assert.Equal(t, "t4g.nano", defaultBastionInstanceType("arm64"))
+	// Stress clients execute the suites; the medium tier matches the members
+	// and must stay on the AMI's architecture.
+	assert.Equal(t, "t3a.medium", defaultBastionInstanceType("amd64"))
+	assert.Equal(t, "t4g.medium", defaultBastionInstanceType("arm64"))
 }

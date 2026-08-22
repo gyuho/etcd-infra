@@ -3,8 +3,10 @@ package stress
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -40,6 +42,10 @@ type Options struct {
 	Duration       int
 	Workers        int
 	RequestsPerSec int
+	// ResultsFile, when set, receives one JSON object per scenario result
+	// (appended), so drivers on remote hosts can upload machine-readable
+	// results for aggregation.
+	ResultsFile string
 }
 
 // Run executes the stress scenarios based on the provided options.
@@ -81,10 +87,32 @@ func Run(opts Options) error {
 		"total", len(results),
 	)
 
+	if opts.ResultsFile != "" {
+		if werr := writeResultsFile(opts.ResultsFile, results); werr != nil {
+			return fmt.Errorf("write results file: %w", werr)
+		}
+	}
+
 	if failed > 0 {
 		return fmt.Errorf("stress scenarios failed: %d", failed)
 	}
 
+	return nil
+}
+
+// writeResultsFile appends one JSON object per scenario result.
+func writeResultsFile(path string, results []scenarios.Result) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	enc := json.NewEncoder(f)
+	for _, result := range results {
+		if err := enc.Encode(result); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

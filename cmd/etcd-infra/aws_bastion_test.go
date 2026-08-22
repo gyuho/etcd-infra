@@ -1,36 +1,25 @@
 package main
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// This file adapts the production tunnel core (aws_tunnel.go) to the test
-// fixture: require-style failures and t.Cleanup lifecycle.
+// This file adapts the cluster state to the test fixture: direct VPC
+// endpoints. The AWS e2e suites run on the cluster's stress client instances
+// (via "aws drive"), which share the members' VPC and security groups, so
+// member private IPs are directly reachable — no port-forwarding tunnels
+// exist.
 
-// startAWSBastionTunnels opens one SSM port-forwarding session per member
-// through the cluster's bastion and returns the loopback client endpoints to
-// use in place of the members' direct URLs. The sessions are IAM-
-// authenticated (the caller's AWS credentials) and terminate at the bastion,
-// which relays to each member's private IPv4 on TCP 2379. Requires the AWS
-// CLI and session-manager-plugin on the test host.
-func startAWSBastionTunnels(t *testing.T, state awsState) []string {
+// awsE2EMemberEndpoints returns the members' direct VPC client endpoints.
+// Requires the test to run in the members' VPC (on a stress client).
+func awsE2EMemberEndpoints(t *testing.T, state awsState) []string {
 	t.Helper()
-	require.NotNil(t, state.Bastion, "cluster %s has no bastion in its state", state.Name)
-
 	endpoints := make([]string, 0, len(state.Instances))
 	for _, member := range state.Instances {
-		ctx, cancel := context.WithCancel(context.Background())
-		endpoint, stop, err := startAWSSSMPortForward(ctx, state.Region, state.Bastion.ID, member.PrivateIPv4, 2379)
-		require.NoError(t, err, "bastion tunnel to %s (%s)", member.Name, member.PrivateIPv4)
-		t.Cleanup(func() {
-			stop()
-			cancel()
-		})
-		t.Logf("bastion tunnel to %s (%s): %s", member.Name, member.PrivateIPv4, endpoint)
-		endpoints = append(endpoints, endpoint)
+		require.NotEmpty(t, member.PrivateIPv4, "%s has no private IP", member.Name)
+		endpoints = append(endpoints, "http://"+member.PrivateIPv4+":2379")
 	}
 	return endpoints
 }

@@ -1,41 +1,28 @@
 #!/usr/bin/env bash
-# Runs the etcd conformance and stress suites against an AWS EC2 cluster:
-# brings up one release-image cluster with "etcd-infra aws up --bastion",
-# opens SSM port-forwarding tunnels through the bastion ("etcd-infra aws
-# tunnel"), runs the suites against the loopback endpoints, and tears the
-# cluster down. Client connections originate at the bastion inside the VPC,
-# so etcd never needs a public ingress rule — mirroring production.
+# Runs the conformance and stress suites against a 3-member etcd cluster on
+# AWS. The suites execute on the cluster's stress client instance, inside
+# the VPC: the binaries ship through S3 and the results come back through S3
+# ("etcd-infra aws drive"). No tunnels, no public etcd ingress.
 #
 # Required environment:
-#   AWS_REGION (or AWS default region)
-#   ETCD_INFRA_AWS_VPC               existing VPC ID
-#   ETCD_INFRA_AWS_AMI               Linux AMI with systemd, curl, tar,
-#                                    sha256sum, and a running SSM agent
+#   AWS_REGION                       AWS region
+#   ETCD_INFRA_AWS_VPC               VPC ID for the cluster
+#   ETCD_INFRA_AWS_AMI               Linux AMI with systemd, curl, tar, sha256sum, SSM agent
 #   ETCD_INFRA_AWS_INSTANCE_PROFILE  IAM instance profile with SSM permissions
-#
-# Optional:
-#   ETCD_INFRA_AWS_SUBNET            existing subnet ID
-#   ETCD_INFRA_AWS_SECURITY_GROUPS   comma-separated security group IDs; must
-#                                    allow member-to-member TCP 2379 and 2380
-#                                    (the bastion shares them)
-#   ETCD_INFRA_AWS_VERSION           etcd release version (default: latest)
-#   ETCD_INFRA_AWS_CONFORMANCE_SCENARIO  run one scenario (default: all)
-#   ETCD_INFRA_AWS_STRESS_SCENARIO   run one scenario (default: all)
-#   ETCD_INFRA_AWS_STRESS_DURATION   seconds per stress scenario (default: 60)
-#   ETCD_INFRA_AWS_STRESS_WORKERS    concurrent workers (default: 10)
+# Optional: ETCD_INFRA_AWS_SUBNET, ETCD_INFRA_AWS_SECURITY_GROUPS,
+#   ETCD_INFRA_AWS_VERSION (etcd release, default: latest),
+#   ETCD_INFRA_AWS_STRESS_DURATION   seconds per stress scenario per leg (default: 60)
+#   ETCD_INFRA_AWS_STRESS_WORKERS    stress workers (default: 10)
 #   ETCD_INFRA_AWS_STRESS_RPS        requests per second (default: 100)
-#   ETCD_INFRA_SLOW_PATH_MULTIPLIER  latency-budget multiplier for the
-#                                    bastion-tunnel path (default: 2)
-#   ETCD_INFRA_CLIENT                "custom" builds the leader-aware client
-#                                    from the fork (default: official)
-#   ETCD_INFRA_AWS_REPLACE_MEMBER    when set (member name or "leader"), create
-#                                    the cluster with --replaceable and replace
-#                                    this member between the two conformance
-#                                    passes, mirroring hack/e2e.sh
+#   ETCD_INFRA_AWS_STRESS_SCENARIO   comma-separated stress scenario IDs (default: all)
+#   ETCD_INFRA_SLOW_PATH_MULTIPLIER  latency-budget multiplier (default: 1; in-VPC paths need none)
+#   ETCD_INFRA_AWS_S3_BUCKET         override the derived monthly bucket
 #
-# The test host needs the AWS CLI and session-manager-plugin in PATH.
-# Credentials: use the least-privilege user from hack/aws-e2e.iam-policy.json
-# so the suite cannot touch EKS or any other AWS resources.
+# Credentials: run this with the least-privilege user from
+# hack/aws-e2e.iam-policy.json (tagged-instance EC2 lifecycle in one region,
+# SSM on tagged instances only, the binary bucket prefix, PassRole to the SSM
+# instance-profile role) so the tests cannot touch EKS or any other AWS
+# resources.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,37 +35,34 @@ for var in ETCD_INFRA_AWS_VPC ETCD_INFRA_AWS_AMI ETCD_INFRA_AWS_INSTANCE_PROFILE
     fi
 done
 command -v aws >/dev/null 2>&1 || { echo "the AWS CLI is required" >&2; exit 2; }
-command -v session-manager-plugin >/dev/null 2>&1 || { echo "session-manager-plugin is required: the suites reach the members over SSM port-forwarding through the bastion" >&2; exit 2; }
+
+. "${project_root}/hack/aws-e2e-lib.sh"
 
 tmpdir="$(mktemp -d)"
-tunnel_pid=""
 cleanup() {
-    if [[ -n "${tunnel_pid}" ]]; then
-        kill "${tunnel_pid}" >/dev/null 2>&1 || true
+    if [[ -x "${tmpdir}/etcd-infra" ]]; then
+        "${tmpdir}/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     fi
-    "${tmpdir}/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     rm -rf "${tmpdir}"
 }
-trap cleanup EXIT
+trap 'rc=$?; cleanup; exit "$rc"' EXIT
 
 "${project_root}/hack/build.sh"
-# A private copy: a concurrently running suite (local or AWS) rebuilds
-# bin/etcd-infra, and a mid-leg swap silently changes the client under test.
 cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra"
-# Remove any stale cluster with the same name without tearing down tmpdir.
+bucket="$(ensure_aws_bucket)"
+
+build_linux_driver_binaries "${tmpdir}"
+
 "${tmpdir}/etcd-infra" aws down --name "${cluster}" >/dev/null 2>&1 || true
 
 up_args=(
-    --name "${cluster}" --members 3 --bastion
+    --name "${cluster}" --members 3 --stress-clients 1
     --vpc "${ETCD_INFRA_AWS_VPC}"
     --ami "${ETCD_INFRA_AWS_AMI}"
     --instance-profile "${ETCD_INFRA_AWS_INSTANCE_PROFILE}"
     --version "${ETCD_INFRA_AWS_VERSION:-latest}"
     --dry-run=false
 )
-if [[ -n "${ETCD_INFRA_AWS_REPLACE_MEMBER:-}" ]]; then
-    up_args+=(--replaceable)
-fi
 if [[ -n "${AWS_REGION:-}" ]]; then
     up_args+=(--region "${AWS_REGION}")
 fi
@@ -90,62 +74,40 @@ if [[ -n "${ETCD_INFRA_AWS_SECURITY_GROUPS:-}" ]]; then
 fi
 "${tmpdir}/etcd-infra" aws up "${up_args[@]}"
 
-# "aws tunnel" prints one stdout line with the CSV of loopback endpoints once
-# every tunnel accepts connections, then holds the sessions in the
-# foreground. Progress goes to stderr.
-"${tmpdir}/etcd-infra" aws tunnel --name "${cluster}"     > "${tmpdir}/endpoints" 2> "${tmpdir}/tunnel.log" &
-tunnel_pid=$!
-for _ in $(seq 1 90); do
-    [[ -s "${tmpdir}/endpoints" ]] && break
-    if ! kill -0 "${tunnel_pid}" 2>/dev/null; then
-        echo "aws tunnel exited before the endpoints were ready:" >&2
-        cat "${tmpdir}/tunnel.log" >&2
-        exit 1
-    fi
-    sleep 1
-done
-endpoints="$(cat "${tmpdir}/endpoints")"
-if [[ -z "${endpoints}" ]]; then
-    echo "aws tunnel never printed endpoints; log:" >&2
-    cat "${tmpdir}/tunnel.log" >&2
-    exit 1
+conformance_args=(--scenario "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO:-}")
+if [[ -z "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO:-}" ]]; then
+    conformance_args=()
 fi
-echo "cluster endpoints via bastion: ${endpoints}"
+results_root="/tmp/etcd-infra-results-${cluster}-$(date +%s)"
+"${tmpdir}/etcd-infra" aws drive --name "${cluster}" \
+    --binary "${tmpdir}/etcd-infra-official" --bucket "${bucket}" \
+    --suite conformance --args "${conformance_args[*]:-}" \
+    --results-dir "${results_root}/conformance" \
+    --timeout 2h
 
-conformance_args=(--endpoints "${endpoints}")
-if [[ -n "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO:-}" ]]; then
-    conformance_args+=(--scenario "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO}")
-fi
-"${tmpdir}/etcd-infra" conformance "${conformance_args[@]}"
-
-if [[ -n "${ETCD_INFRA_AWS_REPLACE_MEMBER:-}" ]]; then
-    "${tmpdir}/etcd-infra" aws replace --name "${cluster}" \
-        --member "${ETCD_INFRA_AWS_REPLACE_MEMBER}"
-    "${tmpdir}/etcd-infra" conformance "${conformance_args[@]}"
-fi
-
-# Snapshot peer-byte counters around the stress run: the sent-bytes delta is
-# the peer bandwidth the client routing consumed, so an official-client run
-# and a leader-aware run (ETCD_INFRA_CLIENT=custom hack/build.sh) can be
-# compared directly.
-"${tmpdir}/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-before.txt"
-
-stress_args=(
-    --endpoints "${endpoints}"
-    --duration "${ETCD_INFRA_AWS_STRESS_DURATION:-60}"
-    --workers "${ETCD_INFRA_AWS_STRESS_WORKERS:-10}"
-    --rps "${ETCD_INFRA_AWS_STRESS_RPS:-100}"
-)
+stress_args=(--duration "${ETCD_INFRA_AWS_STRESS_DURATION:-60}" --workers "${ETCD_INFRA_AWS_STRESS_WORKERS:-10}" --rps "${ETCD_INFRA_AWS_STRESS_RPS:-100}")
 if [[ -n "${ETCD_INFRA_AWS_STRESS_SCENARIO:-}" ]]; then
     stress_args+=(--scenario "${ETCD_INFRA_AWS_STRESS_SCENARIO}")
 fi
-# SSM port-forwarding adds ~150ms/RTT plus proxy jitter; under load, marginal
-# p99 measurements land just over thresholds tuned for direct/VPN links. The
-# multiplier scales those thresholds only (success rates stay strict).
-ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
-    "${tmpdir}/etcd-infra" stress "${stress_args[@]}"
 
-"${tmpdir}/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-after.txt"
-before_sent=$(awk '/^TOTAL/ {print $2}' "${tmpdir}/metrics-before.txt")
-after_sent=$(awk '/^TOTAL/ {print $2}' "${tmpdir}/metrics-after.txt")
-echo "peer-sent bytes consumed by the stress run: $((after_sent - before_sent)) (${ETCD_INFRA_CLIENT:-official} client)"
+run_stress_leg() {
+    local label="$1" binary="$2"
+    "${tmpdir}/etcd-infra" aws drive --name "${cluster}" \
+        --binary "${binary}" --bucket "${bucket}" \
+        --suite stress --args "${stress_args[*]}" \
+        --env "ETCD_INFRA_SLOW_PATH_MULTIPLIER=${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-1}" \
+        --results-dir "${results_root}/stress-${label}" \
+        --timeout 2h
+}
+
+run_stress_leg official "${tmpdir}/etcd-infra-official"
+run_stress_leg custom "${tmpdir}/etcd-infra-custom"
+
+echo
+echo "=== peer-sent bytes per stress leg (summed across members and clients) ==="
+for label in official custom; do
+    before=$(awk '{s+=$1} END{print s+0}' "${results_root}/stress-${label}/"*/metrics-before.txt)
+    after=$(awk '{s+=$1} END{print s+0}' "${results_root}/stress-${label}/"*/metrics-after.txt)
+    echo "${label}: $((after - before)) bytes"
+done
+echo "results: ${results_root}"

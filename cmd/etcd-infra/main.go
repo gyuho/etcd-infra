@@ -112,6 +112,7 @@ func runStress(args []string) error {
 	duration := flags.Int("duration", 60, "duration in seconds")
 	workers := flags.Int("workers", 10, "concurrent workers")
 	rps := flags.Int("rps", 100, "requests per second; 0 is unlimited")
+	resultsFile := flags.String("results-file", "", "append per-scenario results as JSON lines to this file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -130,6 +131,7 @@ func runStress(args []string) error {
 		Duration:       *duration,
 		Workers:        *workers,
 		RequestsPerSec: *rps,
+		ResultsFile:    *resultsFile,
 	})
 }
 

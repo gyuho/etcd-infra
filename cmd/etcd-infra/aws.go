@@ -38,7 +38,7 @@ type awsUpOptions struct {
 	Env                string
 	Members            int
 	DryRun             bool
-	Bastion            bool
+	StressClients      int
 	BastionType        string
 	Replaceable        bool
 }
@@ -48,11 +48,13 @@ type awsState struct {
 	Region    string             `json:"region"`
 	Version   string             `json:"version"`
 	Instances []awsInstanceState `json:"instances"`
-	// Bastion, when set, is a dedicated SSM-only relay instance in the same
-	// VPC and security groups. Test client traffic reaches the members over
-	// SSM port-forwarding through the bastion, so etcd never needs a public
-	// ingress rule.
-	Bastion *awsInstanceState `json:"bastion,omitempty"`
+	// StressClients are the in-VPC driver instances: suites execute there
+	// (binary via S3, results back via S3), so etcd never needs a public
+	// ingress rule and no port-forwarding tunnels exist. They share the
+	// members' security groups, so client traffic is covered by the
+	// member-to-member rules. More than one spreads across the VPC's
+	// subnets (availability zones).
+	StressClients []awsInstanceState `json:"stressClients,omitempty"`
 	// The fields below let "aws replace" reproduce a member exactly.
 	Arch         string   `json:"arch,omitempty"`
 	ExtraArgs    []string `json:"extraArgs,omitempty"`
@@ -67,11 +69,15 @@ type awsInstanceState struct {
 	ID          string `json:"id"`
 	PrivateIPv4 string `json:"privateIPv4"`
 	PublicIPv4  string `json:"publicIPv4,omitempty"`
+	SubnetID    string `json:"subnetID,omitempty"`
+	// DataVolumeID is the member's dedicated data volume, recorded at
+	// creation: teardown deletes exactly these IDs, never a tag sweep.
+	DataVolumeID string `json:"dataVolumeID,omitempty"`
 }
 
 func runAWS(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: etcd-infra aws <up|down|status|tunnel|replace>")
+		return errors.New("usage: etcd-infra aws <up|down|status|drive|replace>")
 	}
 
 	switch args[0] {
@@ -81,8 +87,8 @@ func runAWS(ctx context.Context, args []string) error {
 		return runAWSDown(ctx, args[1:])
 	case "status":
 		return runAWSStatus(ctx, args[1:])
-	case "tunnel":
-		return runAWSTunnel(ctx, args[1:])
+	case "drive":
+		return runAWSDrive(ctx, args[1:])
 	case "replace":
 		return runAWSReplace(ctx, args[1:])
 	default:
@@ -109,9 +115,9 @@ func runAWSUp(ctx context.Context, args []string) error {
 	flags.StringVar(&opts.ExtraArgs, "extra-args", "", "space-separated extra arguments appended to the etcd server command")
 	flags.StringVar(&opts.Env, "env", "", "comma-separated KEY=VALUE environment variables for the etcd systemd unit")
 	flags.IntVar(&opts.Members, "members", 3, "cluster member count (1 or 3)")
-	flags.BoolVar(&opts.Bastion, "bastion", false, "add an SSM-only bastion relay instance; test clients reach members through it, so etcd needs no public ingress")
+	flags.IntVar(&opts.StressClients, "stress-clients", 1, "in-VPC stress client (driver) instances; suites run there — no tunnels, no public etcd ingress; >1 spreads across the VPC's subnets")
 	flags.BoolVar(&opts.Replaceable, "replaceable", false, "give each member a dedicated data volume that survives termination, enabling 'aws replace'")
-	flags.StringVar(&opts.BastionType, "bastion-instance-type", "", "bastion EC2 instance type (default derived from --arch: t3a.nano or t4g.nano)")
+	flags.StringVar(&opts.BastionType, "bastion-instance-type", "", "stress client EC2 instance type (default derived from --arch: t3a.medium or t4g.medium)")
 	flags.BoolVar(&opts.DryRun, "dry-run", true, "show the plan without creating EC2 instances")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -151,7 +157,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 		return errors.New("AWS region is required via --region or AWS configuration")
 	}
 	opts.Region = cfg.Region
-	if opts.Bastion && opts.BastionType == "" {
+	if opts.StressClients > 0 && opts.BastionType == "" {
 		opts.BastionType = defaultBastionInstanceType(opts.Arch)
 	}
 	manager := awsprovider.New(cfg)
@@ -210,52 +216,74 @@ func runAWSUp(ctx context.Context, args []string) error {
 		if state.Instances[i].PrivateIPv4 == "" {
 			return awsSetupError(statePath, state, fmt.Errorf("%s has no private IPv4 address", state.Instances[i].Name))
 		}
+		// Record the data volume ID so teardown deletes exactly the volumes
+		// this tool created — by ID, never by tag sweep.
+		if opts.Replaceable {
+			volumeID, volErr := manager.DataVolumeID(ctx, state.Instances[i].ID)
+			if volErr != nil {
+				return awsSetupError(statePath, state, fmt.Errorf("read %s data volume: %w", state.Instances[i].Name, volErr))
+			}
+			state.Instances[i].DataVolumeID = volumeID
+		}
 	}
 	if err := writeAWSState(statePath, state); err != nil {
 		return awsSetupError(statePath, state, fmt.Errorf("save resolved AWS cluster state: %w", err))
 	}
 
-	if opts.Bastion {
-		// The bastion is a pure relay: no etcd bootstrap, no userdata, only
-		// the SSM agent (required of the AMI already). Sharing the members'
-		// subnet and security groups puts bastion-to-member traffic under the
-		// same member-to-member rules, so no new network infrastructure is
-		// created.
-		bastionName := opts.Name + "-bastion"
-		instance, createErr := manager.Create(ctx, compute.NewCreateRequest(
-			compute.WithName(bastionName),
-			compute.WithRegion(opts.Region),
-			compute.WithVPCID(opts.VPCID),
-			compute.WithSubnetID(opts.SubnetID),
-			compute.WithSecurityGroupIDs(opts.SecurityGroupIDs),
-			compute.WithImage(opts.AMI),
-			compute.WithSize(opts.BastionType),
-			compute.WithTags(map[string]string{"etcd-infra.cluster": opts.Name, "etcd-infra.role": "bastion"}),
-			compute.WithProviderConfig(awsprovider.CreateConfig{
-				IAMInstanceProfile: opts.IAMInstanceProfile,
-			}),
-		))
-		if createErr != nil {
-			return awsSetupError(statePath, state, fmt.Errorf("create %s: %w", bastionName, createErr))
+	if opts.StressClients > 0 {
+		// Stress clients execute the suites in-VPC: no etcd bootstrap, only
+		// the SSM agent (required of the AMI already) and the AWS CLI. They
+		// share the members' security groups, so client traffic is covered by
+		// the member-to-member rules. More than one spreads across the VPC's
+		// subnets so the load is balanced across availability zones.
+		subnets, subnetsErr := manager.SubnetsInVPC(ctx, opts.VPCID)
+		if subnetsErr != nil {
+			return awsSetupError(statePath, state, fmt.Errorf("list subnets for stress client placement: %w", subnetsErr))
 		}
-		state.Bastion = &awsInstanceState{Name: bastionName, ID: instance.ID()}
-		if err := writeAWSState(statePath, state); err != nil {
-			if _, delErr := manager.Delete(ctx, compute.NewDeleteRequest(instance.ID())); delErr != nil {
-				return fmt.Errorf("save AWS cluster state: %w (compensating delete of unrecorded bastion %s also failed: %v — terminate it manually)", err, instance.ID(), delErr)
+		if opts.SubnetID != "" {
+			subnets = []string{opts.SubnetID}
+		}
+		if len(subnets) == 0 {
+			return awsSetupError(statePath, state, fmt.Errorf("VPC %s has no subnets for stress clients", opts.VPCID))
+		}
+		for i := range opts.StressClients {
+			clientName := fmt.Sprintf("%s-stress-client-%d", opts.Name, i+1)
+			subnet := subnets[i%len(subnets)]
+			instance, createErr := manager.Create(ctx, compute.NewCreateRequest(
+				compute.WithName(clientName),
+				compute.WithRegion(opts.Region),
+				compute.WithVPCID(opts.VPCID),
+				compute.WithSubnetID(subnet),
+				compute.WithSecurityGroupIDs(opts.SecurityGroupIDs),
+				compute.WithImage(opts.AMI),
+				compute.WithSize(opts.BastionType),
+				compute.WithTags(map[string]string{"etcd-infra.cluster": opts.Name, "etcd-infra.role": "stress-client"}),
+				compute.WithProviderConfig(awsprovider.CreateConfig{
+					IAMInstanceProfile: opts.IAMInstanceProfile,
+				}),
+			))
+			if createErr != nil {
+				return awsSetupError(statePath, state, fmt.Errorf("create %s: %w", clientName, createErr))
 			}
-			return fmt.Errorf("save AWS cluster state: %w", err)
-		}
-		ready, waitErr := manager.WaitForReady(ctx, instance.ID(), awsReadyTimeout)
-		if waitErr != nil {
-			return awsSetupError(statePath, state, fmt.Errorf("wait for %s: %w", bastionName, waitErr))
-		}
-		state.Bastion.PrivateIPv4 = ready.PrivateIPv4()
-		state.Bastion.PublicIPv4 = ready.PublicIPv4()
-		if state.Bastion.PrivateIPv4 == "" {
-			return awsSetupError(statePath, state, fmt.Errorf("%s has no private IPv4 address", bastionName))
-		}
-		if err := writeAWSState(statePath, state); err != nil {
-			return awsSetupError(statePath, state, fmt.Errorf("save bastion state: %w", err))
+			state.StressClients = append(state.StressClients, awsInstanceState{Name: clientName, ID: instance.ID(), SubnetID: subnet})
+			if err := writeAWSState(statePath, state); err != nil {
+				if _, delErr := manager.Delete(ctx, compute.NewDeleteRequest(instance.ID())); delErr != nil {
+					return fmt.Errorf("save AWS cluster state: %w (compensating delete of unrecorded stress client %s also failed: %v — terminate it manually)", err, instance.ID(), delErr)
+				}
+				return fmt.Errorf("save AWS cluster state: %w", err)
+			}
+			ready, waitErr := manager.WaitForReady(ctx, instance.ID(), awsReadyTimeout)
+			if waitErr != nil {
+				return awsSetupError(statePath, state, fmt.Errorf("wait for %s: %w", clientName, waitErr))
+			}
+			state.StressClients[i].PrivateIPv4 = ready.PrivateIPv4()
+			state.StressClients[i].PublicIPv4 = ready.PublicIPv4()
+			if state.StressClients[i].PrivateIPv4 == "" {
+				return awsSetupError(statePath, state, fmt.Errorf("%s has no private IPv4 address", clientName))
+			}
+			if err := writeAWSState(statePath, state); err != nil {
+				return awsSetupError(statePath, state, fmt.Errorf("save stress client state: %w", err))
+			}
 		}
 	}
 
@@ -347,20 +375,21 @@ func runAWSDown(ctx context.Context, args []string) error {
 
 	remaining := make([]awsInstanceState, 0, len(state.Instances))
 	var deleteErrors []error
-	if state.Bastion != nil {
-		if _, err := manager.Delete(ctx, compute.NewDeleteRequest(state.Bastion.ID)); err != nil {
-			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s (%s): %w", state.Bastion.Name, state.Bastion.ID, err))
-		} else {
-			state.Bastion = nil
+	remainingClients := state.StressClients[:0]
+	for _, client := range state.StressClients {
+		if _, err := manager.Delete(ctx, compute.NewDeleteRequest(client.ID)); err != nil {
+			remainingClients = append(remainingClients, client)
+			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s (%s): %w", client.Name, client.ID, err))
 		}
 	}
+	state.StressClients = remainingClients
 	for _, instance := range state.Instances {
 		if _, err := manager.Delete(ctx, compute.NewDeleteRequest(instance.ID)); err != nil {
 			remaining = append(remaining, instance)
 			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s (%s): %w", instance.Name, instance.ID, err))
 		}
 	}
-	if len(remaining) > 0 || state.Bastion != nil {
+	if len(remaining) > 0 || len(state.StressClients) > 0 {
 		state.Instances = remaining
 		if err := writeAWSState(statePath, state); err != nil {
 			deleteErrors = append(deleteErrors, fmt.Errorf("save remaining AWS state: %w", err))
@@ -368,17 +397,23 @@ func runAWSDown(ctx context.Context, args []string) error {
 		return errors.Join(deleteErrors...)
 	}
 	if state.Replaceable {
-		// Replaceable clusters leave tagged data volumes behind on purpose
+		// Replaceable clusters leave their data volumes behind on purpose
 		// (DeleteOnTermination=false). Volumes detach only once the
 		// instances finish terminating, so wait for that first — otherwise
-		// the delete races the detach and leaks the volume.
+		// the delete races the detach and leaks the volume. Only the volume
+		// IDs recorded at creation are deleted.
 		for _, instance := range state.Instances {
 			if err := manager.WaitForTerminated(ctx, instance.ID, 5*time.Minute); err != nil {
 				return fmt.Errorf("wait for %s to terminate before volume cleanup: %w", instance.Name, err)
 			}
 		}
-		if err := manager.DeleteClusterVolumes(ctx, state.Name); err != nil {
-			return fmt.Errorf("delete data volumes: %w", err)
+		for _, instance := range state.Instances {
+			if instance.DataVolumeID == "" {
+				continue
+			}
+			if err := manager.DeleteDataVolume(ctx, instance.DataVolumeID); err != nil {
+				return fmt.Errorf("delete data volume %s: %w", instance.DataVolumeID, err)
+			}
 		}
 	}
 	if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -417,14 +452,13 @@ func runAWSStatus(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("%s\t%s\t%s\t%s\n", saved.Name, saved.ID, instance.State(), instance.PrivateIPv4())
 	}
-	if state.Bastion != nil {
-		instance, err := manager.Get(ctx, state.Bastion.ID)
+	for _, client := range state.StressClients {
+		instance, err := manager.Get(ctx, client.ID)
 		if err != nil {
-			return fmt.Errorf("get %s (%s): %w", state.Bastion.Name, state.Bastion.ID, err)
+			return fmt.Errorf("get %s (%s): %w", client.Name, client.ID, err)
 		}
-		fmt.Printf("%s\t%s\t%s\t%s\n", state.Bastion.Name, state.Bastion.ID, instance.State(), instance.PrivateIPv4())
+		fmt.Printf("%s\t%s\t%s\t%s\n", client.Name, client.ID, instance.State(), instance.PrivateIPv4())
 	}
-	printAWSEndpoints(state)
 	return nil
 }
 
@@ -452,8 +486,11 @@ func validateAWSUpOptions(opts awsUpOptions) error {
 	if opts.Arch != "amd64" && opts.Arch != "arm64" {
 		return fmt.Errorf("arch must be amd64 or arm64, got %q", opts.Arch)
 	}
-	if opts.BastionType != "" && !opts.Bastion {
-		return errors.New("--bastion-instance-type requires --bastion")
+	if opts.BastionType != "" && opts.StressClients == 0 {
+		return errors.New("--bastion-instance-type requires --stress-clients > 0")
+	}
+	if opts.StressClients < 0 {
+		return errors.New("--stress-clients must be >= 0")
 	}
 	if opts.Replaceable && opts.BinaryURL != "" {
 		return errors.New("--replaceable requires a release version; custom-binary clusters cannot be replaced (the presigned URL expires)")
@@ -473,11 +510,9 @@ func validateAWSUpOptions(opts awsUpOptions) error {
 	return nil
 }
 
-// defaultBastionInstanceType sizes the bastion for its actual load: an SSM
-// port-forwarding relay for low-rate test client traffic. It must match the
-// AMI architecture selected by --arch (the bastion runs the same AMI). The
-// nano tier is deliberate: unlike a bastion that executes test suites (the
-// k8x pattern, which needs t3a.medium), this relay only shuttles TCP streams.
+// defaultBastionInstanceType sizes the stress clients for their actual
+// load: they execute the test suites in-VPC (the k8x pattern), so the medium
+// tier matches the members. The AMI architecture must match --arch.
 // awsDataVolumeSizeGB is the per-member data volume size for replaceable
 // clusters; the durability tests write well under 1 GiB.
 const awsDataVolumeSizeGB = 8
@@ -493,9 +528,9 @@ func dataVolumeSizeGB(replaceable bool) int {
 
 func defaultBastionInstanceType(arch string) string {
 	if arch == "arm64" {
-		return "t4g.nano"
+		return "t4g.medium"
 	}
-	return "t3a.nano"
+	return "t3a.medium"
 }
 
 func awsVersionLabel(opts awsUpOptions) string {
@@ -511,12 +546,12 @@ func printAWSPlan(opts awsUpOptions) {
 		fmt.Printf(", subnet %s", opts.SubnetID)
 	}
 	fmt.Printf(", etcd %s/%s\n", awsVersionLabel(opts), opts.Arch)
-	if opts.Bastion {
+	if opts.StressClients > 0 {
 		bastionType := opts.BastionType
 		if bastionType == "" {
 			bastionType = defaultBastionInstanceType(opts.Arch)
 		}
-		fmt.Printf("plus 1 %s bastion relay (SSM-only; no inbound rules needed)\n", bastionType)
+		fmt.Printf("plus %d %s stress client(s) running suites in-VPC (no inbound rules needed)\n", opts.StressClients, bastionType)
 	}
 	if opts.Replaceable {
 		fmt.Printf("plus 1 dedicated %d GiB data volume per member (survives termination for 'aws replace')\n", awsDataVolumeSizeGB)
@@ -713,10 +748,11 @@ func readAWSState(path string) (awsState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return awsState{}, fmt.Errorf("parse AWS state %s: %w", path, err)
 	}
-	// A state with no members is valid when a bastion remains: a failed "aws
-	// down" can delete every member yet fail on the bastion, and the next
-	// "aws down" must still be able to read the state to finish the job.
-	if state.Name == "" || state.Region == "" || (len(state.Instances) == 0 && state.Bastion == nil) {
+	// A state with no members is valid when a stress client remains: a
+	// failed "aws down" can delete every member yet fail on a stress client,
+	// and the next "aws down" must still be able to read the state to finish
+	// the job.
+	if state.Name == "" || state.Region == "" || (len(state.Instances) == 0 && len(state.StressClients) == 0) {
 		return awsState{}, fmt.Errorf("invalid AWS state %s", path)
 	}
 	return state, nil
@@ -732,10 +768,19 @@ func printAWSEndpoints(state awsState) {
 		}
 	}
 	fmt.Printf("VPC endpoints: %s\n", strings.Join(privateEndpoints, ","))
-	if state.Bastion != nil {
-		fmt.Printf("bastion %s (%s): e2e tests reach members over SSM port-forwarding through the bastion; no inbound security-group rule for the test host is required\n",
-			state.Bastion.Name, state.Bastion.ID)
+	if len(state.StressClients) > 0 {
+		fmt.Printf("stress clients: suites run in-VPC on %s; no inbound security-group rule for the test host is required\n",
+			stressClientNames(state))
 	} else if len(publicEndpoints) == len(state.Instances) {
 		fmt.Printf("public endpoints (requires security-group ingress): %s\n", strings.Join(publicEndpoints, ","))
 	}
+}
+
+// stressClientNames lists the stress client instance names for display.
+func stressClientNames(state awsState) string {
+	names := make([]string, 0, len(state.StressClients))
+	for _, client := range state.StressClients {
+		names = append(names, fmt.Sprintf("%s (%s)", client.Name, client.ID))
+	}
+	return strings.Join(names, ", ")
 }

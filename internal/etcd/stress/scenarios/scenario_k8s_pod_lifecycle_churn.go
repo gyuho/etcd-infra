@@ -13,8 +13,8 @@ import (
 	"git.tbd/etcd-infra/pkg/randutil"
 )
 
-// RunK8sPodLifecycleChurn models kube-apiserver pod churn at scale: writers
-// create pod-shaped objects under /registry/pods/<ns>/<name> (a few KB each,
+// RunK8sPodLifecycleChurn models kube-apiserver pod churn: writers create
+// pod-shaped objects under /registry/pods/<ns>/<name> (a few KB each,
 // matching real pod specs), update them twice (status subresource writes),
 // and delete them, while long-lived prefix watches consume the collection —
 // the informer pattern from staging/src/k8s.io/apiserver/pkg/storage/etcd3/watcher.go.

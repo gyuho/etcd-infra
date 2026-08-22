@@ -83,9 +83,12 @@ cannot race the leader's snapshot stream.
 `./hack/aws-snapdb-e2e.sh` runs the same suite on EC2 and adds the one test
 no local setup can do: a real machine crash. It builds gofail-enabled
 linux/amd64 binaries from the fix and control commits, uploads them to S3,
-and brings up one cluster per image with `aws up --binary-url --bastion` (a
-presigned S3 URL with a verified SHA-256, plus an SSM-only bastion relay). The tests drive the members over SSM
-RunCommand and systemd, arm failpoints through a systemd drop-in, and finish
+and brings up one cluster per image with `aws up --binary-url` (a
+presigned S3 URL with a verified SHA-256, plus one stress client instance).
+The compiled test binary then ships to the stress client through S3 and runs
+there, inside the VPC (`etcd-infra aws drive`). The tests drive the members
+over SSM RunCommand and systemd, arm failpoints through a systemd drop-in,
+and finish
 with `TestSnapDBHardPowerLossAWSE2E`: with a snapshot received and the WAL
 record durable, the member is hard-rebooted in-guest with
 `echo b > /proc/sysrq-trigger` — the SysRq reboot(b) command from the EC2
@@ -105,11 +108,11 @@ Required environment: `AWS_REGION`, `ETCD_INFRA_AWS_VPC`,
 `ETCD_INFRA_AWS_SUBNET`, `ETCD_INFRA_AWS_SECURITY_GROUPS`, and
 `ETCD_INFRA_AWS_S3_BUCKET` (default derived from account, region, and
 month). The security groups must allow
-member-to-member TCP 2379 and 2380; the bastion joins the same groups, so
-bastion-to-member traffic needs no extra rules. Client traffic rides SSM
-port-forwarding through the bastion, so no inbound rule for the test host is
-required and etcd is never exposed publicly. The test host needs the AWS CLI
-and session-manager-plugin.
+member-to-member TCP 2379 and 2380; the stress clients join the same groups,
+so client-to-member traffic needs no extra rules. All test traffic executes
+inside the VPC on the stress clients, so no inbound rule for the test host
+is required and etcd is never exposed publicly. The test host needs only the
+AWS CLI.
 
 Use least-privilege credentials: `hack/aws-e2e.iam-policy.json` is fully
 portable — every ARN wildcards account and region, and no per-account
@@ -142,6 +145,12 @@ aws iam attach-role-policy --role-name etcd-infra-ssm \
   --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 aws iam attach-role-policy --role-name etcd-infra-ssm \
   --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+# the suites execute on the stress clients, so the role also carries the
+# tag-scoped execution permissions (documented, least-privilege)
+aws iam create-policy --policy-name etcd-infra-ssm-exec \
+  --policy-document file://hack/aws-ssm-role-exec.iam-policy.json
+aws iam attach-role-policy --role-name etcd-infra-ssm \
+  --policy-arn arn:aws:iam::<account-id>:policy/etcd-infra-ssm-exec
 aws iam create-instance-profile --instance-profile-name etcd-infra-ssm
 aws iam add-role-to-instance-profile --instance-profile-name etcd-infra-ssm \
   --role-name etcd-infra-ssm
@@ -234,14 +243,14 @@ instance profile. It does not create network or IAM infrastructure. The AMI
 must provide systemd, curl, tar, sha256sum, and a running SSM agent. Security
 groups must allow member-to-member TCP 2379 and 2380.
 
-Pass `--bastion` to add a dedicated SSM-only relay instance (default
-`t3a.nano`, or `t4g.nano` with `--arch arm64`; override with
-`--bastion-instance-type`) in the same subnet and security groups. The AWS
-e2e tests then reach member TCP 2379 over SSM port-forwarding through the
-bastion instead of dialing instance IPs directly, so etcd needs no inbound
-security-group rule from the test host — the production-realistic topology.
-The relay only shuttles TCP streams, which is why it is sized far below the
-members; it runs no test code.
+`aws up` always creates stress client instances (`--stress-clients N`,
+default 1; `t3a.medium`, or `t4g.medium` with `--arch arm64`; override
+with `--bastion-instance-type`) in the members' security groups. Suites run
+on them: `etcd-infra aws drive` ships the test or suite binary through S3,
+executes it on each client over SSM RunCommand against the VPC endpoints, and
+collects the results from S3. With N > 1 the clients spread round-robin over
+the VPC's subnets, so stress load is balanced across availability zones. etcd
+never needs a public ingress rule, and there is no port-forwarding anywhere.
 
 Preview is the default and makes no AWS changes:
 
@@ -265,9 +274,11 @@ Create only after reviewing the plan:
 
 AWS state is stored under `~/.etcd-infra/aws/`. Created clusters use plain HTTP
 inside the supplied VPC and are intended only for isolated test infrastructure.
+Teardown deletes only the resources the tool created and recorded in the state
+file: instances and data volumes go by their recorded IDs, never by tag sweep.
 If a run is interrupted mid-creation (for example SIGKILL between an instance
-launch and the state write), an unrecorded instance can remain; the tag is the
-source of truth — find and terminate orphans with
+launch and the state write), an unrecorded instance can remain; find and
+terminate orphans by hand with
 `aws ec2 describe-instances --filters Name=tag:etcd-infra.cluster,Values=<name>`.
 
 The AWS compute manager implements `compute.Lifecycle.ReplaceMachine` two

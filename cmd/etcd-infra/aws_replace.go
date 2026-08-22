@@ -204,47 +204,16 @@ func awsReplaceMemberIndex(ctx context.Context, state awsState, member string) (
 	return -1, fmt.Errorf("leader id %d not found in membership", leaderID)
 }
 
-// awsClientEndpoints returns client endpoints for the cluster: bastion
-// tunnels when the cluster has a bastion, otherwise direct member IPs
-// (public when every member has one, private otherwise). The returned stop
-// function releases any tunnels.
-func awsClientEndpoints(ctx context.Context, state awsState) ([]string, func(), error) {
-	if state.Bastion == nil {
-		usePublic := true
-		for _, instance := range state.Instances {
-			if instance.PublicIPv4 == "" {
-				usePublic = false
-			}
-		}
-		endpoints := make([]string, 0, len(state.Instances))
-		for _, instance := range state.Instances {
-			ip := instance.PrivateIPv4
-			if usePublic {
-				ip = instance.PublicIPv4
-			}
-			if ip == "" {
-				return nil, nil, fmt.Errorf("%s has no reachable IP", instance.Name)
-			}
-			endpoints = append(endpoints, "http://"+ip+":2379")
-		}
-		return endpoints, func() {}, nil
-	}
-
-	stops := make([]awsTunnelStop, 0, len(state.Instances))
-	stopAll := func() {
-		for _, stop := range stops {
-			stop()
-		}
-	}
+// awsClientEndpoints returns direct member endpoints. Suites execute on the
+// cluster's in-VPC stress clients (see "aws drive"), so member private IPs
+// are always reachable; there are no port-forwarding tunnels.
+func awsClientEndpoints(_ context.Context, state awsState) ([]string, func(), error) {
 	endpoints := make([]string, 0, len(state.Instances))
-	for _, member := range state.Instances {
-		endpoint, stop, err := startAWSSSMPortForward(ctx, state.Region, state.Bastion.ID, member.PrivateIPv4, 2379)
-		if err != nil {
-			stopAll()
-			return nil, nil, fmt.Errorf("tunnel to %s: %w", member.Name, err)
+	for _, instance := range state.Instances {
+		if instance.PrivateIPv4 == "" {
+			return nil, nil, fmt.Errorf("%s has no private IP", instance.Name)
 		}
-		stops = append(stops, stop)
-		endpoints = append(endpoints, endpoint)
+		endpoints = append(endpoints, "http://"+instance.PrivateIPv4+":2379")
 	}
-	return endpoints, stopAll, nil
+	return endpoints, func() {}, nil
 }
