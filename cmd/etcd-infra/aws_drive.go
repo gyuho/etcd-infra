@@ -103,17 +103,18 @@ func runAWSDrive(ctx context.Context, args []string) error {
 	for i, client := range targets {
 		wg.Go(func() {
 			script := driveScript(driveJob{
-				Region:    state.Region,
-				Bucket:    *bucket,
-				BinaryKey: binaryKey,
-				Cluster:   state.Name,
-				Client:    client.Name,
-				RunTag:    runTag,
-				Suite:     *suite,
-				Args:      *suiteArgs,
-				Env:       strings.Join(splitCSV(*env), " "),
-				Endpoints: strings.Join(endpoints, " "),
-				StateB64:  base64.StdEncoding.EncodeToString(stateJSON),
+				Region:       state.Region,
+				Bucket:       *bucket,
+				BinaryKey:    binaryKey,
+				Cluster:      state.Name,
+				Client:       client.Name,
+				RunTag:       runTag,
+				Suite:        *suite,
+				Args:         *suiteArgs,
+				Env:          strings.Join(splitCSV(*env), " "),
+				Endpoints:    strings.Join(endpoints, " "),
+				EndpointsCSV: strings.Join(endpoints, ","),
+				StateB64:     base64.StdEncoding.EncodeToString(stateJSON),
 			})
 			instance, getErr := manager.Get(ctx, client.ID)
 			if getErr != nil {
@@ -172,8 +173,10 @@ type driveJob struct {
 	Suite     string
 	Args      string
 	Env       string // space-separated KEY=VALUE assignments for the suite process
-	Endpoints string // space-separated member endpoints
-	StateB64  string
+	Endpoints string // space-separated member endpoints, for the metrics loop
+	// EndpointsCSV is the comma-separated form the --endpoints flag expects.
+	EndpointsCSV string
+	StateB64     string
 }
 
 // driveScript renders the on-host driver: download the binary, snapshot the
@@ -189,9 +192,9 @@ func driveScript(job driveJob) string {
 		// The shipped binary is the compiled test binary; args carry -test.run.
 		runLine = fmt.Sprintf("ETCD_INFRA_AWS_E2E_STATE=\"$work/state.json\" %s ./etcd-infra %s", job.Env, job.Args)
 	case "stress":
-		runLine = fmt.Sprintf("%s ./etcd-infra stress --endpoints \"%s\" %s --results-file results.jsonl", job.Env, job.Endpoints, job.Args)
+		runLine = fmt.Sprintf("%s ./etcd-infra stress --endpoints \"%s\" %s --results-file results.jsonl", job.Env, job.EndpointsCSV, job.Args)
 	default:
-		runLine = fmt.Sprintf("%s ./etcd-infra %s --endpoints \"%s\" %s", job.Env, job.Suite, job.Endpoints, job.Args)
+		runLine = fmt.Sprintf("%s ./etcd-infra %s --endpoints \"%s\" %s", job.Env, job.Suite, job.EndpointsCSV, job.Args)
 	}
 
 	return "set -euo pipefail\n" +
