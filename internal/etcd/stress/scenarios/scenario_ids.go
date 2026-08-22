@@ -65,4 +65,13 @@ const (
 	// WatchBookmarkHeavy staging/src/k8s.io/apiserver/pkg/storage/etcd3/watcher.go bookmarks
 	// Stresses watcher.go's bookmark emission path that powers Kubernetes watch bookmarks for large collections.
 	WatchBookmarkHeavy
+	// K8sPodLifecycleChurn staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go + watcher.go
+	// Create, status-update, delete of pod-shaped objects with long-lived informer prefix watches.
+	K8sPodLifecycleChurn
+	// K8sNodeHeartbeatLeases staging/src/k8s.io/kubelet/pkg/nodelease
+	// Short-TTL lease renewals on a fixed interval, the kubelet node heartbeat pattern.
+	K8sNodeHeartbeatLeases
+	// K8sMixedApiserver composes the kube-apiserver shape: informer fan-out, steady reads,
+	// bursty pod churn, and node lease renewals concurrently.
+	K8sMixedApiserver
 )
