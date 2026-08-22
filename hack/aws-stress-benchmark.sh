@@ -43,11 +43,19 @@ cleanup() {
     fi
     "${project_root}/bin/etcd-infra" aws down --name "${cluster}" >/dev/null 2>&1 \
         || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+    if [[ "${1:-0}" != "0" ]]; then
+        # Keep the leg logs on failure: they carry the scenario output that
+        # explains why the run died.
+        local kept="/tmp/etcd-infra-bench-failed-$(date +%s)"
+        mv "${tmpdir}" "${kept}"
+        echo "benchmark failed; leg logs kept at ${kept}" >&2
+        return
+    fi
     rm -rf "${tmpdir}"
 }
 # bash 3.2 leaks the trap's last command status over the failing status;
 # capture and re-exit so the caller sees the real result.
-trap 'rc=$?; cleanup; exit $rc' EXIT
+trap 'rc=$?; cleanup "$rc"; exit "$rc"' EXIT
 
 # Build both binaries up front so nothing rebuilds between legs.
 ETCD_INFRA_CLIENT=official "${project_root}/hack/build.sh"

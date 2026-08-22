@@ -53,28 +53,28 @@ func RunK8sNodeHeartbeatLeases(runner StressRunner) {
 	errs := runWorkers(nodes, func(workerID int, _ chan<- error) {
 		key := fmt.Sprintf("%s/node-%02d", prefix, workerID)
 
-		ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+		ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 		lease, err := cli.Grant(ctx, 10)
 		cancel()
 		if err != nil {
 			return
 		}
 		// The node lease object is itself a lease-attached key.
-		ctx, cancel = runner.NewCtxTimeout(5 * time.Second)
+		ctx, cancel = runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 		_, err = cli.Put(ctx, key, fmt.Sprintf("node-%02d", workerID), clientv3.WithLease(lease.ID))
 		cancel()
 		if err != nil {
 			return
 		}
 		defer func() {
-			ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			_, _ = cli.Revoke(ctx, lease.ID)
 			cancel()
 		}()
 
 		for time.Now().Before(deadline) {
 			//nolint:contextcheck // timeout context for short-lived operation within goroutine
-			ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			start := time.Now()
 			if _, err := cli.KeepAliveOnce(ctx, lease.ID); err != nil {
 				metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())

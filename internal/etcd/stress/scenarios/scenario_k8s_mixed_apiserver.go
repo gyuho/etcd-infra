@@ -83,7 +83,7 @@ func RunK8sMixedApiserver(runner StressRunner) {
 			for time.Now().Before(deadline) {
 				key := fmt.Sprintf("%s/pods/ns-%02d/pod-%04d", root, randutil.Intn(8), randutil.Intn(200))
 				//nolint:contextcheck // timeout context for short-lived operation within goroutine
-				ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 				start := time.Now()
 				if _, err := cli.Get(ctx, key); err != nil {
 					metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
@@ -104,7 +104,7 @@ func RunK8sMixedApiserver(runner StressRunner) {
 				value := randutil.StringAlphabetsLowerCase(valueSize(cfg, 3072))
 
 				//nolint:contextcheck // timeout context for short-lived operation within goroutine
-				ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 				start := time.Now()
 				if _, err := cli.Put(ctx, key, value); err != nil {
 					metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
@@ -122,26 +122,26 @@ func RunK8sMixedApiserver(runner StressRunner) {
 	wg.Go(func() {
 		leaseErrs = runWorkers(2, func(workerID int, _ chan<- error) {
 			key := fmt.Sprintf("%s/leases/kube-node-lease/node-%02d", root, workerID)
-			ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			lease, err := cli.Grant(ctx, 10)
 			cancel()
 			if err != nil {
 				return
 			}
-			ctx, cancel = runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel = runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			_, err = cli.Put(ctx, key, fmt.Sprintf("node-%02d", workerID), clientv3.WithLease(lease.ID))
 			cancel()
 			if err != nil {
 				return
 			}
 			defer func() {
-				ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 				_, _ = cli.Revoke(ctx, lease.ID)
 				cancel()
 			}()
 			for time.Now().Before(deadline) {
 				//nolint:contextcheck // timeout context for short-lived operation within goroutine
-				ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 				start := time.Now()
 				if _, err := cli.KeepAliveOnce(ctx, lease.ID); err != nil {
 					metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())

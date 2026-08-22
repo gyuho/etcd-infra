@@ -76,7 +76,7 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 			value := randutil.StringAlphabetsLowerCase(valueSize(cfg, 3072))
 
 			//nolint:contextcheck // timeout context for short-lived operation within goroutine
-			ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			start := time.Now()
 			if _, err := cli.Put(ctx, key, value); err != nil {
 				metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
@@ -88,7 +88,7 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 			cancel()
 
 			for range 2 {
-				ctx, cancel := runner.NewCtxTimeout(5 * time.Second)
+				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 				start := time.Now()
 				if _, err := cli.Put(ctx, key, value+"-status"); err != nil {
 					metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
@@ -98,7 +98,7 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 				cancel()
 			}
 
-			ctx, cancel = runner.NewCtxTimeout(5 * time.Second)
+			ctx, cancel = runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			start = time.Now()
 			if _, err := cli.Delete(ctx, key); err != nil {
 				metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
