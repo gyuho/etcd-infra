@@ -240,6 +240,22 @@ func awsE2EGofailDropIn(failpointTerms string) string {
 	return "[Service]\nEnvironment=\n" + awsSystemdEnvironment([]string{awsE2EGofailEnv, failpointTerms})
 }
 
+// awsE2ESystemdScript wraps a systemctl operation with settle-and-retry: a
+// queued or in-flight job (systemd auto-restart after a kill, or a cleanup
+// from a prior run) cancels a new job with "Job for X canceled". Wait for the
+// queue to settle and retry rather than failing the suite.
+const awsE2ESystemdScript = `
+for i in 1 2 3 4 5 6; do
+  systemctl reset-failed ` + awsE2EService + ` 2>/dev/null || true
+  if %s; then
+    exit 0
+  fi
+  sleep 3
+done
+echo "systemd operation kept failing" >&2
+exit 1
+`
+
 // awsE2EArmFailpoint arms a gofail failpoint on one member through a systemd
 // drop-in and restarts the member's etcd, so the failpoint is active from
 // process boot — before any peer traffic — and re-arms on every later
@@ -251,7 +267,7 @@ mkdir -p /etc/systemd/system/etcd-infra.service.d
 cat > /etc/systemd/system/etcd-infra.service.d/gofail.conf <<'EOF'
 `+awsE2EGofailDropIn(failpointTerms)+`EOF
 systemctl daemon-reload
-systemctl restart `+awsE2EService)
+`+fmt.Sprintf(awsE2ESystemdScript, "systemctl restart "+awsE2EService))
 }
 
 // awsE2EDisarmFailpointOnCleanup disarms any armed failpoint at test end,
@@ -280,7 +296,7 @@ func awsE2EDisarmFailpoint(t *testing.T, ctx context.Context, instance compute.I
 	awsE2ERun(t, ctx, instance, `
 rm -f /etc/systemd/system/etcd-infra.service.d/gofail.conf
 systemctl daemon-reload
-systemctl restart `+awsE2EService)
+`+fmt.Sprintf(awsE2ESystemdScript, "systemctl restart "+awsE2EService))
 }
 
 // awsE2EClearFailpoint deactivates a failpoint on the running process over
@@ -292,12 +308,13 @@ func awsE2EClearFailpoint(t *testing.T, ctx context.Context, instance compute.In
 
 func awsE2EStopEtcd(t *testing.T, ctx context.Context, instance compute.Instance) {
 	t.Helper()
-	awsE2ERun(t, ctx, instance, "systemctl stop "+awsE2EService)
+	awsE2ERun(t, ctx, instance, fmt.Sprintf(awsE2ESystemdScript,
+		"systemctl stop "+awsE2EService+" && while systemctl is-active --quiet "+awsE2EService+"; do sleep 1; done"))
 }
 
 func awsE2EStartEtcd(t *testing.T, ctx context.Context, instance compute.Instance) {
 	t.Helper()
-	awsE2ERun(t, ctx, instance, "systemctl start "+awsE2EService)
+	awsE2ERun(t, ctx, instance, fmt.Sprintf(awsE2ESystemdScript, "systemctl start "+awsE2EService))
 }
 
 // awsE2EKillEtcd SIGKILLs etcd and stops the unit in the same command, so
@@ -429,13 +446,39 @@ func awsE2EDriveSnapshotToMember(t *testing.T, ctx context.Context, f awsSnapDBE
 func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixture, cli *clientv3.Client, idx int, probe func() bool, probeDesc string) {
 	t.Helper()
 	target := f.instances[idx]
-	if probe == nil {
-		probe = func() bool { return len(awsE2ESnapDBFiles(t, ctx, target)) > 0 }
-		probeDesc = "a snapshot db"
-	}
 
 	for round := 1; ; round++ {
+		// The round's receive marker must survive any receive speed: the
+		// *.snap.db filename exists only for the stream's duration, which is
+		// sub-millisecond on a fast in-VPC path, and "applying snapshot" only
+		// logs after SaveDBFrom — after the pause failpoints. The handler's
+		// "receiving database snapshot" logs at stream start and persists
+		// through every pause, so probe the journal for it, scoped to this
+		// round's start.
+		roundSince := awsE2ETimestamp(t, ctx, target)
+		if probe == nil {
+			probe = func() bool {
+				return strings.TrimSpace(awsE2EJournalGrepSince(t, ctx, target, roundSince, "receiving database snapshot")) != ""
+			}
+			probeDesc = "a snapshot receive (journal)"
+		}
+		t.Logf("round %d: stopping %s at %s", round, target.ID(), time.Now().UTC().Format("15:04:05.000"))
 		awsE2EStopEtcd(t, ctx, target)
+		// Prove the stop: the member's endpoint must refuse connections before
+		// the drive's writes land, or the member receives them live and no
+		// snapshot is ever needed.
+		statusCtx, statusCancel := context.WithTimeout(ctx, 3*time.Second)
+		_, statusErr := cli.Status(statusCtx, f.endpoints[idx])
+		statusCancel()
+		if statusErr == nil {
+			t.Logf("round %d: %s still answers after stop; waiting for the stop to settle", round, target.ID())
+			require.Eventually(t, func() bool {
+				c, cancel2 := context.WithTimeout(ctx, 3*time.Second)
+				_, err := cli.Status(c, f.endpoints[idx])
+				cancel2()
+				return err != nil
+			}, 30*time.Second, time.Second, "%s never stopped answering", target.ID())
+		}
 		// Drop interrupted-save artifacts before the freshness check, every
 		// round: a completed apply renames snap.db to .snap, so a *.snap.db
 		// present while etcd is stopped is by definition stale, and the file
@@ -454,6 +497,17 @@ func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixtur
 		cancel()
 		require.NoError(t, err)
 
+		// The leader compacts its raft log only when its own snapshotter runs
+		// (every snapshot-count applies, asynchronously). Restarting the member
+		// before that compaction lands lets it catch up from plain log entries
+		// and no snapshot streams. The SSM command latencies masked this on
+		// slower paths; on the fast in-VPC path the slack must be explicit.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+
 		awsE2EStartEtcd(t, ctx, target)
 
 		deadline := time.Now().Add(90 * time.Second)
@@ -467,10 +521,19 @@ func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixtur
 			case <-time.After(2 * time.Second):
 			}
 		}
-		if round == 3 {
-			t.Fatalf("%s: no %s after %d rounds", target.ID(), probeDesc, round)
+		journalTail := awsE2ERun(t, ctx, target,
+			"journalctl -u "+awsE2EService+" --no-pager | tail -20 | cut -c1-220")
+		t.Logf("no snapshot streamed in round %d; member journal tail:\n%s", round, journalTail.Stdout)
+		// The leader's side decides log-vs-snapshot: dump every member's
+		// snapshot/compaction lines and who leads.
+		for _, other := range f.instances {
+			if other.ID() == target.ID() {
+				continue
+			}
+			out := awsE2ERun(t, ctx, other,
+				"journalctl -u "+awsE2EService+" --no-pager | grep -aE 'compacted|saved snapshot|sending database snapshot|sending snapshot|elected leader|removed member|added member' | tail -10 | cut -c1-220")
+			t.Logf("peer %s snapshot/compaction lines:\n%s", other.ID(), out.Stdout)
 		}
-		t.Logf("no snapshot streamed in round %d (member caught up from the leader's log); driving further ahead", round)
 	}
 }
 
@@ -540,8 +603,22 @@ func TestSnapDBReceiveCrashWindowAWSE2E(t *testing.T) {
 	t.Log("make the member lag and restart its etcd so the leader must stream a snapshot")
 	awsE2EDriveSnapshotToMember(t, ctx, f, cli, targetIdx)
 
+	// The crash window is the rename-to-fsync pause. On a fast in-VPC path
+	// the receive stream is sub-millisecond, so the *.snap.db filename (gone
+	// after the rename) cannot be polled reliably. Detect the window from the
+	// journal instead: "applying snapshot" is logged before the pause and
+	// persists, while SaveDBFrom's "saved database snapshot to disk" only
+	// appears after the pause — and the failpoint pauses between them.
+	// The crash window is the rename-to-fsync pause. "receiving database
+	// snapshot" logs at stream start and persists through the pause, while
+	// SaveDBFrom's "saved database snapshot to disk" only appears after it —
+	// the failpoint pauses between them. (The older "applying snapshot"
+	// marker logs after the pause and so cannot see the window.)
 	t.Log("wait until the snap.db rename has happened (the member is inside the crash window)")
-	waitForAWSSnapDBFile(t, ctx, target)
+	waitForAWSJournalSince(t, ctx, target, "receiving database snapshot", sinceTestStart)
+	require.Eventually(t, func() bool {
+		return strings.TrimSpace(awsE2EJournalGrepSince(t, ctx, target, sinceTestStart, "saved database snapshot to disk")) == ""
+	}, 30*time.Second, time.Second, "the save completed before the crash could land in the window")
 
 	t.Log("SIGKILL etcd inside the window, between the snap.db rename and the directory fsync")
 	awsE2EKillEtcd(t, ctx, target)

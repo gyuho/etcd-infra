@@ -198,7 +198,9 @@ func driveScript(job driveJob) string {
 	}
 
 	return "set -euo pipefail\n" +
-		"work=/tmp/etcd-infra-drive\n" +
+		// Per-run work dir: overlapping drives on one client must not remove
+		// each other's in-flight downloads.
+		"work=/tmp/etcd-infra-drive-" + job.RunTag + "\n" +
 		"rm -rf \"$work\"; mkdir -p \"$work\"; cd \"$work\"\n" +
 		"export AWS_REGION=" + job.Region + "\n" +
 		"ENDPOINTS=\"" + job.Endpoints + "\"\n" +
