@@ -68,8 +68,11 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 		}()
 	}
 
-	// Pod churn workers: create, two status updates, delete.
-	workers := max(workerCount(cfg), 4)
+	// Pod churn workers: create, two status updates, delete. Churn is a
+	// lifecycle workload, not a throughput flood: even a 10k-node cluster
+	// churns on the order of 100 pods/s, so cap the writers regardless of
+	// the benchmark's worker scaling (which drives the throughput scenarios).
+	workers := min(max(workerCount(cfg), 4), 8)
 	errs := runWorkers(workers, func(workerID int, _ chan<- error) {
 		for time.Now().Before(deadline) {
 			key := fmt.Sprintf("%s/ns-%02d/pod-%04d", prefix, randutil.Intn(8), randutil.Intn(200))
