@@ -56,14 +56,17 @@ cleanup() {
     if [[ -n "${tunnel_pid}" ]]; then
         kill "${tunnel_pid}" >/dev/null 2>&1 || true
     fi
-    "${project_root}/bin/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+    "${tmpdir}/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
 
 "${project_root}/hack/build.sh"
+# A private copy: a concurrently running suite (local or AWS) rebuilds
+# bin/etcd-infra, and a mid-leg swap silently changes the client under test.
+cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
 # Remove any stale cluster with the same name without tearing down tmpdir.
-"${project_root}/bin/etcd-infra" aws down --name "${cluster}" >/dev/null 2>&1 || true
+"${tmpdir}/etcd-infra" aws down --name "${cluster}" >/dev/null 2>&1 || true
 
 up_args=(
     --name "${cluster}" --members 3 --bastion
@@ -85,12 +88,12 @@ fi
 if [[ -n "${ETCD_INFRA_AWS_SECURITY_GROUPS:-}" ]]; then
     up_args+=(--security-groups "${ETCD_INFRA_AWS_SECURITY_GROUPS}")
 fi
-"${project_root}/bin/etcd-infra" aws up "${up_args[@]}"
+"${tmpdir}/etcd-infra" aws up "${up_args[@]}"
 
 # "aws tunnel" prints one stdout line with the CSV of loopback endpoints once
 # every tunnel accepts connections, then holds the sessions in the
 # foreground. Progress goes to stderr.
-"${project_root}/bin/etcd-infra" aws tunnel --name "${cluster}"     > "${tmpdir}/endpoints" 2> "${tmpdir}/tunnel.log" &
+"${tmpdir}/etcd-infra" aws tunnel --name "${cluster}"     > "${tmpdir}/endpoints" 2> "${tmpdir}/tunnel.log" &
 tunnel_pid=$!
 for _ in $(seq 1 90); do
     [[ -s "${tmpdir}/endpoints" ]] && break
@@ -113,19 +116,19 @@ conformance_args=(--endpoints "${endpoints}")
 if [[ -n "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO:-}" ]]; then
     conformance_args+=(--scenario "${ETCD_INFRA_AWS_CONFORMANCE_SCENARIO}")
 fi
-"${project_root}/bin/etcd-infra" conformance "${conformance_args[@]}"
+"${tmpdir}/etcd-infra" conformance "${conformance_args[@]}"
 
 if [[ -n "${ETCD_INFRA_AWS_REPLACE_MEMBER:-}" ]]; then
-    "${project_root}/bin/etcd-infra" aws replace --name "${cluster}" \
+    "${tmpdir}/etcd-infra" aws replace --name "${cluster}" \
         --member "${ETCD_INFRA_AWS_REPLACE_MEMBER}"
-    "${project_root}/bin/etcd-infra" conformance "${conformance_args[@]}"
+    "${tmpdir}/etcd-infra" conformance "${conformance_args[@]}"
 fi
 
 # Snapshot peer-byte counters around the stress run: the sent-bytes delta is
 # the peer bandwidth the client routing consumed, so an official-client run
 # and a leader-aware run (ETCD_INFRA_CLIENT=custom hack/build.sh) can be
 # compared directly.
-"${project_root}/bin/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-before.txt"
+"${tmpdir}/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-before.txt"
 
 stress_args=(
     --endpoints "${endpoints}"
@@ -140,9 +143,9 @@ fi
 # p99 measurements land just over thresholds tuned for direct/VPN links. The
 # multiplier scales those thresholds only (success rates stay strict).
 ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
-    "${project_root}/bin/etcd-infra" stress "${stress_args[@]}"
+    "${tmpdir}/etcd-infra" stress "${stress_args[@]}"
 
-"${project_root}/bin/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-after.txt"
+"${tmpdir}/etcd-infra" metrics --endpoints "${endpoints}" | tee "${tmpdir}/metrics-after.txt"
 before_sent=$(awk '/^TOTAL/ {print $2}' "${tmpdir}/metrics-before.txt")
 after_sent=$(awk '/^TOTAL/ {print $2}' "${tmpdir}/metrics-after.txt")
 echo "peer-sent bytes consumed by the stress run: $((after_sent - before_sent)) (${ETCD_INFRA_CLIENT:-official} client)"

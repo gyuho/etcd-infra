@@ -36,12 +36,18 @@ done
 command -v aws >/dev/null 2>&1 || { echo "the AWS CLI is required" >&2; exit 2; }
 command -v session-manager-plugin >/dev/null 2>&1 || { echo "session-manager-plugin is required: the tests reach the members over SSM port-forwarding through the bastion" >&2; exit 2; }
 
+tmpdir="$(mktemp -d)"
 cleanup() {
-    "${project_root}/bin/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+    if [[ -x "${tmpdir}/etcd-infra" ]]; then
+        "${tmpdir}/etcd-infra" aws down --name "${cluster}" || echo "WARN: aws down failed for ${cluster}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+    fi
+    rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
 
 "${project_root}/hack/build.sh"
+# A private copy: a concurrently running suite rebuilds bin/etcd-infra.
+cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
 cleanup
 
 up_args=(
@@ -61,7 +67,7 @@ fi
 if [[ -n "${ETCD_INFRA_AWS_SECURITY_GROUPS:-}" ]]; then
     up_args+=(--security-groups "${ETCD_INFRA_AWS_SECURITY_GROUPS}")
 fi
-"${project_root}/bin/etcd-infra" aws up "${up_args[@]}"
+"${tmpdir}/etcd-infra" aws up "${up_args[@]}"
 
 # Each test replaces one member end to end (terminate, relaunch, reattach,
 # re-bootstrap, rejoin), so the go test timeout must cover two full

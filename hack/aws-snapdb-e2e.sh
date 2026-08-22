@@ -73,10 +73,14 @@ fi
 command -v aws >/dev/null 2>&1 || { echo "the AWS CLI is required" >&2; exit 2; }
 command -v session-manager-plugin >/dev/null 2>&1 || { echo "session-manager-plugin is required: the tests reach the members over SSM port-forwarding through the bastion" >&2; exit 2; }
 
+tmpdir="$(mktemp -d)"
 cleanup() {
-    for flavor in control fix; do
-        "${project_root}/bin/etcd-infra" aws down --name "${cluster_base}-${flavor}" || echo "WARN: aws down failed for ${cluster_base}-${flavor}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
-    done
+    if [[ -x "${tmpdir}/etcd-infra" ]]; then
+        for flavor in control fix; do
+            "${tmpdir}/etcd-infra" aws down --name "${cluster_base}-${flavor}" || echo "WARN: aws down failed for ${cluster_base}-${flavor}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
+        done
+    fi
+    rm -rf "${tmpdir}"
 }
 trap cleanup EXIT
 
@@ -84,6 +88,8 @@ trap cleanup EXIT
 # container images, which this script does not use).
 ETCD_INFRA_SNAPDB_ARCH=amd64 "${project_root}/hack/snapdb/build.sh"
 "${project_root}/hack/build.sh"
+# A private copy: a concurrently running suite rebuilds bin/etcd-infra.
+cp "${tmpdir}/etcd-infra" "${tmpdir}/etcd-infra"
 
 # upload prints "<sha256> <presigned-url>" for one flavor's binary.
 upload() {
@@ -129,7 +135,7 @@ run_flavor() {
     # Do not run the tests against a cluster that never came up: with the
     # outer "|| flavor_exit" disabling set -e for this function, an up failure
     # must return before go test, or every test fails on a broken cluster.
-    if ! "${project_root}/bin/etcd-infra" aws up "${up_args[@]}"; then
+    if ! "${tmpdir}/etcd-infra" aws up "${up_args[@]}"; then
         echo "aws up failed for ${name}; skipping its tests" >&2
         return 1
     fi
@@ -145,7 +151,7 @@ run_flavor() {
         GOCACHE="${GOCACHE:-${project_root}/.release-work/go-build}" \
         go test -run "^(${tests})$" -count=1 -timeout=120m -v "${project_root}/cmd/etcd-infra" || test_exit=$?
 
-    if ! "${project_root}/bin/etcd-infra" aws down --name "${name}"; then
+    if ! "${tmpdir}/etcd-infra" aws down --name "${name}"; then
         echo "WARN: aws down failed for ${name}; cluster may leak — check ~/.etcd-infra/aws/ and EC2" >&2
     fi
     return "${test_exit}"
