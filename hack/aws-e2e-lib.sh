@@ -19,7 +19,7 @@ ensure_aws_bucket() {
         return 2
     fi
     bucket="${ETCD_INFRA_AWS_S3_BUCKET:-etcd-infra-e2e-${account}-${region}-v0-$(date -u +%Y%m)}"
-    if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+    if ! aws s3api head-bucket --bucket "${bucket}" >/dev/null 2>&1; then
         echo "creating bucket ${bucket}" >&2
         if [[ "${region}" == "us-east-1" ]]; then
             aws s3api create-bucket --bucket "${bucket}" >/dev/null
