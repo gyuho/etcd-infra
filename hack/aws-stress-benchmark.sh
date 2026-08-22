@@ -19,6 +19,8 @@
 #   ETCD_INFRA_AWS_STRESS_WORKERS    workers (default: 10)
 #   ETCD_INFRA_AWS_STRESS_RPS        requests/s per worker (default: 100)
 #   ETCD_INFRA_SLOW_PATH_MULTIPLIER  latency-budget multiplier (default: 2)
+#   ETCD_INFRA_BENCH_SCENARIOS       comma-separated scenario IDs (default: all)
+#   ETCD_INFRA_AWS_BASTION_TYPE      bastion instance type (default: t3a.nano)
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +57,7 @@ cp "${project_root}/bin/etcd-infra" "${tmpdir}/etcd-infra-custom"
 
 up_args=(
     --name "${cluster}" --members 3 --bastion
+    --bastion-instance-type "${ETCD_INFRA_AWS_BASTION_TYPE:-t3a.nano}"
     --vpc "${ETCD_INFRA_AWS_VPC}"
     --ami "${ETCD_INFRA_AWS_AMI}"
     --instance-profile "${ETCD_INFRA_AWS_INSTANCE_PROFILE}"
@@ -97,8 +100,13 @@ total_sent() { awk '/^TOTAL/ {print $2}' "$1"; }
 run_leg() {
     local label="$1" rep="$2" binary="${tmpdir}/etcd-infra-$3"
     "${binary}" metrics --endpoints "${endpoints}" > "${tmpdir}/${label}-${rep}-before.txt"
+    local scenario_args=()
+    if [[ -n "${ETCD_INFRA_BENCH_SCENARIOS:-}" ]]; then
+        scenario_args+=(--scenario "${ETCD_INFRA_BENCH_SCENARIOS}")
+    fi
     ETCD_INFRA_SLOW_PATH_MULTIPLIER="${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
     "${binary}" stress --endpoints "${endpoints}" \
+        "${scenario_args[@]}" \
         --duration "${ETCD_INFRA_AWS_STRESS_DURATION:-90}" \
         --workers "${ETCD_INFRA_AWS_STRESS_WORKERS:-10}" \
         --rps "${ETCD_INFRA_AWS_STRESS_RPS:-100}" \

@@ -24,6 +24,7 @@ func TestNormalizeEndpoints(t *testing.T) {
 func TestResolveScenarioIDs(t *testing.T) {
 	t.Parallel()
 	require.Equal(t, []string{"id-123"}, resolveScenarioIDs("id-123"))
+	require.Equal(t, []string{"id-123", "id-456"}, resolveScenarioIDs("id-123, id-456"))
 
 	ids := resolveScenarioIDs("")
 	require.NotEmpty(t, ids)

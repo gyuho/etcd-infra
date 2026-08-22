@@ -109,7 +109,13 @@ func normalizeEndpoints(endpoints []string) []string {
 func resolveScenarioIDs(scenarioID string) []string {
 	scenarioID = strings.TrimSpace(scenarioID)
 	if scenarioID != "" {
-		return []string{scenarioID}
+		var ids []string
+		for _, id := range strings.Split(scenarioID, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		return ids
 	}
 
 	ids := make([]string, 0, len(scenarios.StressIDStringToRunnerFunc))
