@@ -10,7 +10,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -42,7 +44,11 @@ type awsTunnelStop func()
 // 127.0.0.1:<free port> -> bastion (SSM target) -> host:remotePort. The
 // returned endpoint is the loopback URL; call stop to end the session. The
 // AWS CLI and session-manager-plugin must be in PATH.
-func startAWSSSMPortForward(ctx context.Context, region, bastionID, host string, remotePort int) (string, awsTunnelStop, error) {
+func startAWSSSMPortForward(ctx context.Context, region, bastionID, host string, remotePort int, preferredPort ...int) (string, awsTunnelStop, error) {
+	wantPort := 0
+	if len(preferredPort) > 0 {
+		wantPort = preferredPort[0]
+	}
 	if strings.TrimSpace(host) == "" {
 		return "", nil, errors.New("remote host is required")
 	}
@@ -56,7 +62,7 @@ func startAWSSSMPortForward(ctx context.Context, region, bastionID, host string,
 
 	var lastErr error
 	for attempt := 1; attempt <= awsTunnelAttempts; attempt++ {
-		endpoint, stop, err := tryAWSSSMPortForward(ctx, awsCLI, region, bastionID, host, remotePort)
+		endpoint, stop, err := tryAWSSSMPortForward(ctx, awsCLI, region, bastionID, host, remotePort, wantPort)
 		if err == nil {
 			return endpoint, stop, nil
 		}
@@ -68,9 +74,15 @@ func startAWSSSMPortForward(ctx context.Context, region, bastionID, host string,
 
 // tryAWSSSMPortForward makes one tunnel attempt. On failure the plugin
 // process is killed and reaped before returning, so retries start clean.
-func tryAWSSSMPortForward(ctx context.Context, awsCLI, region, bastionID, host string, remotePort int) (string, awsTunnelStop, error) {
+func tryAWSSSMPortForward(ctx context.Context, awsCLI, region, bastionID, host string, remotePort, preferredPort int) (string, awsTunnelStop, error) {
 	// Reserve a free loopback port, then release it for the plugin to bind.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// A preferred port lets a supervisor re-establish a dropped session on the
+	// same port, keeping the endpoints stable for callers.
+	bind := "127.0.0.1:0"
+	if preferredPort > 0 {
+		bind = fmt.Sprintf("127.0.0.1:%d", preferredPort)
+	}
+	listener, err := net.Listen("tcp", bind)
 	if err != nil {
 		return "", nil, fmt.Errorf("reserve loopback port: %w", err)
 	}
@@ -185,12 +197,9 @@ func runAWSTunnel(ctx context.Context, args []string) error {
 		return fmt.Errorf("cluster %s has no bastion; recreate it with 'etcd-infra aws up --bastion'", *name)
 	}
 
-	stops := make([]awsTunnelStop, 0, len(state.Instances))
-	defer func() {
-		for _, stop := range stops {
-			stop()
-		}
-	}()
+	// Per-member tunnel handles; the supervisor swaps the stop function when
+	// it re-establishes a dropped session.
+	tunnels := make([]*supervisedTunnelHandle, 0, len(state.Instances))
 	endpoints := make([]string, 0, len(state.Instances))
 	for _, member := range state.Instances {
 		fmt.Fprintf(os.Stderr, "opening tunnel to %s (%s) via bastion %s\n", member.Name, member.PrivateIPv4, state.Bastion.ID)
@@ -198,12 +207,82 @@ func runAWSTunnel(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("tunnel to %s: %w", member.Name, err)
 		}
-		stops = append(stops, stop)
+		port := tunnelPort(endpoint)
+		tun := &supervisedTunnelHandle{port: port, stop: stop, stopMtx: &sync.Mutex{}}
+		tunnels = append(tunnels, tun)
 		endpoints = append(endpoints, endpoint)
+		// SSM sessions drop on network flaps and idle timeouts; a dead session
+		// leaves the port refusing connections and every consumer fails. Watch
+		// the port and re-establish on the same port so the endpoint stays
+		// valid for the life of the command.
+		go superviseAWSTunnel(ctx, state.Region, state.Bastion.ID, member, tun)
 	}
+	defer func() {
+		for _, tun := range tunnels {
+			tun.stopMtx.Lock()
+			tun.stop()
+			tun.stopMtx.Unlock()
+		}
+	}()
 
 	fmt.Println(strings.Join(endpoints, ","))
 	fmt.Fprintln(os.Stderr, "all tunnels ready; holding until interrupted")
 	<-ctx.Done()
 	return nil
+}
+
+// tunnelPort extracts the loopback port from a tunnel endpoint URL.
+func tunnelPort(endpoint string) int {
+	_, portText, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "http://"))
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// supervisedTunnelHandle is the per-member tunnel state shared with the
+// supervisor; it swaps Stop when it re-establishes a dropped session.
+type supervisedTunnelHandle struct {
+	port    int
+	stop    awsTunnelStop
+	stopMtx *sync.Mutex
+}
+
+// superviseAWSTunnel watches a tunnel's loopback port and re-establishes the
+// SSM session on the same port when the session dies. Probing uses a TCP
+// connect: a dead plugin stops listening, which is exactly the failure mode.
+func superviseAWSTunnel(ctx context.Context, region, bastionID string, member awsInstanceState, tun *supervisedTunnelHandle) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", tun.port), time.Second)
+		if err == nil {
+			_ = conn.Close()
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "tunnel to %s (%s) is down; re-establishing\n", member.Name, member.PrivateIPv4)
+		tun.stopMtx.Lock()
+		tun.stop()
+		endpoint, stop, err := startAWSSSMPortForward(ctx, region, bastionID, member.PrivateIPv4, 2379, tun.port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "re-establishing tunnel to %s failed: %v\n", member.Name, err)
+			tun.stopMtx.Unlock()
+			continue
+		}
+		if tunnelPort(endpoint) != tun.port {
+			fmt.Fprintf(os.Stderr, "re-established tunnel to %s on a different port; endpoint drifted\n", member.Name)
+		}
+		tun.stop = stop
+		tun.stopMtx.Unlock()
+		fmt.Fprintf(os.Stderr, "tunnel to %s (%s) re-established\n", member.Name, member.PrivateIPv4)
+	}
 }
