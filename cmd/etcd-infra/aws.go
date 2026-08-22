@@ -332,6 +332,11 @@ func runAWSDown(ctx context.Context, args []string) error {
 	}
 	state, err := readAWSState(statePath)
 	if err != nil {
+		// Teardown is idempotent: nothing on disk means nothing to remove.
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("no AWS cluster state for %s; nothing to do\n", *name)
+			return nil
+		}
 		return err
 	}
 	cfg, err := awsprovider.LoadDefaultConfig(ctx, state.Region)
