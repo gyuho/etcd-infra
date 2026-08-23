@@ -892,16 +892,23 @@ func awsE2EHardPowerLossNoJournal(t *testing.T, expectPanic bool) {
 	t.Log("wait until the snap.db rename is done and the WAL snapshot record is durable")
 	waitForAWSJournalSince(t, ctx, target, "applying snapshot", sinceDrive)
 	waitForAWSSnapDBFile(t, ctx, target)
-	time.Sleep(2 * time.Second)
 
-	// Pin the WAL before the crash: this test's subject is the snap.db
-	// directory entry, and on ext2 a hard crash can also lose WAL tail pages
-	// (observed on newer kernels: commit index survived, entries did not,
-	// and bootstrap panicked with "tocommit is out of range"). fdatasync
-	// only the WAL file so the dirent stays the sole variable; the directory
-	// entry is untouched and still lives only in the page cache until the
-	// fix's fsync or writeback.
-	awsE2ERun(t, ctx, target, `for f in /var/lib/etcd/member/wal/*.wal; do dd if=/dev/null of="$f" conv=fdatasync,notrunc status=none; done`)
+	// Pin the WAL before the crash, but only once it is quiescent: this
+	// test's subject is the snap.db directory entry, and on ext2 a hard crash
+	// can also lose WAL tail pages (observed on newer kernels: commit index
+	// survived, entries did not, and bootstrap panicked with "tocommit is out
+	// of range"). The catch-up entries stream in while the apply pause holds,
+	// so wait for the WAL to stop changing, then fdatasync only that file.
+	// The snap directory entry is untouched and still lives only in the page
+	// cache until the fix's fsync or writeback.
+	awsE2ERun(t, ctx, target, `
+f=$(ls /var/lib/etcd/member/wal/*.wal | head -1)
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  a=$(stat -c %Y "$f"); sleep 2; b=$(stat -c %Y "$f")
+  [ "$a" = "$b" ] && break
+done
+dd if=/dev/null of="$f" conv=fdatasync,notrunc status=none
+`)
 
 	t.Log("hard-crash the instance: in-guest sysrq reboot(b), no sync, page cache dropped")
 	awsE2EHardCrash(t, ctx, f, targetIdx)
