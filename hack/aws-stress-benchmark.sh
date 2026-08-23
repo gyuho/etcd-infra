@@ -174,8 +174,10 @@ print("=== stress benchmark: leader-aware (custom) vs round_robin (official) ===
 print("peer-sent bytes per leg (mean over palindrome legs, all clients):")
 print(f"  official: {off['peer']:.0f}")
 print(f"  custom:   {cust['peer']:.0f}")
-if off["peer"] > 0:
+if off["peer"] > 0 and cust["peer"] > 0:
     print(f"  reduction: {(off['peer']-cust['peer'])*100/off['peer']:.1f}%")
+else:
+    print("  (incomplete: a side has no leg data — check for failed downloads above)")
 print()
 print(f"{'SCENARIO':40s} {'ops/s off':>10s} {'ops/s la':>10s} {'p99s off':>9s} {'p99s la':>9s} {'avgs off':>9s} {'avgs la':>9s} {'fails':>6s}")
 for sc in sorted(set(off["scenarios"]) | set(cust["scenarios"])):
