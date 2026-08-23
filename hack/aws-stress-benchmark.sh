@@ -85,12 +85,17 @@ run_leg() {
     if [[ -n "${ETCD_INFRA_BENCH_SCENARIOS:-}" ]]; then
         args="${args} --scenario ${ETCD_INFRA_BENCH_SCENARIOS}"
     fi
-    "${tmpdir}/etcd-infra" aws drive --name "${cluster}" \
+    # A leg that fails a threshold must not kill the palindrome: the
+    # comparison table (and its fails column) is the product, and the
+    # remaining legs still carry measurement value.
+    if ! "${tmpdir}/etcd-infra" aws drive --name "${cluster}" \
         --binary "${binary}" --bucket "${bucket}" \
         --suite stress --args "${args}" \
-        --env "ETCD_INFRA_SLOW_PATH_MULTIPLIER=${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-1}" \
+        --env "ETCD_INFRA_SLOW_PATH_MULTIPLIER=${ETCD_INFRA_SLOW_PATH_MULTIPLIER:-2}" \
         --results-dir "${results_root}/${label}" \
-        --timeout 4h
+        --timeout 4h; then
+        echo "leg ${label} FAILED (see ${results_root}/${label}); continuing" >&2
+    fi
     echo "leg ${label} done"
 }
 
