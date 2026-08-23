@@ -236,9 +236,24 @@ func runAWSUp(ctx context.Context, args []string) error {
 		// share the members' security groups, so client traffic is covered by
 		// the member-to-member rules. More than one spreads across the VPC's
 		// subnets so the load is balanced across availability zones.
-		subnets, subnetsErr := manager.SubnetsInVPC(ctx, opts.VPCID)
+		infos, subnetsErr := manager.SubnetInfosInVPC(ctx, opts.VPCID)
 		if subnetsErr != nil {
 			return awsSetupError(statePath, state, fmt.Errorf("list subnets for stress client placement: %w", subnetsErr))
+		}
+		if opts.SubnetID == "" {
+			// The suites are multi-AZ tests: refuse regions whose VPC spans
+			// fewer than three availability zones.
+			azs := map[string]bool{}
+			for _, info := range infos {
+				azs[info.AZ] = true
+			}
+			if len(azs) < 3 {
+				return fmt.Errorf("VPC %s spans only %d availability zones; the AWS suites require at least 3 (pick a region with 3+ AZs)", opts.VPCID, len(azs))
+			}
+		}
+		subnets := make([]string, 0, len(infos))
+		for _, info := range infos {
+			subnets = append(subnets, info.ID)
 		}
 		if opts.SubnetID != "" {
 			subnets = []string{opts.SubnetID}

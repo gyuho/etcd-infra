@@ -683,19 +683,38 @@ const dataVolumeDeviceName = "/dev/xvdf"
 // SubnetsInVPC lists the VPC's subnets (used to spread driver instances
 // across availability zones).
 func (m *Manager) SubnetsInVPC(ctx context.Context, vpcID string) ([]string, error) {
+	infos, err := m.SubnetInfosInVPC(ctx, vpcID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		ids = append(ids, info.ID)
+	}
+	return ids, nil
+}
+
+// SubnetInfo is a subnet's ID and availability zone.
+type SubnetInfo struct {
+	ID string
+	AZ string
+}
+
+// SubnetInfosInVPC lists the VPC's subnets with their availability zones.
+func (m *Manager) SubnetInfosInVPC(ctx context.Context, vpcID string) ([]SubnetInfo, error) {
 	out, err := m.ec2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []types.Filter{{Name: aws.String("vpc-id"), Values: []string{vpcID}}},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("aws: describe subnets in %s: %w", vpcID, err)
 	}
-	var ids []string
+	var infos []SubnetInfo
 	for _, subnet := range out.Subnets {
 		if id := aws.ToString(subnet.SubnetId); id != "" {
-			ids = append(ids, id)
+			infos = append(infos, SubnetInfo{ID: id, AZ: aws.ToString(subnet.AvailabilityZone)})
 		}
 	}
-	return ids, nil
+	return infos, nil
 }
 
 // otherSubnetIDs lists the VPC's subnets other than the given one, for
