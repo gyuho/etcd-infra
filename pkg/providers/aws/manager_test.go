@@ -31,6 +31,9 @@ type fakeEC2 struct {
 	attachedVolumes           []string
 	deletedVolumes            []string
 	attachVolumeErr           error
+	createVolumeErr           error
+	createVolumeID            string
+	detachVolumeErr           error
 	deleteVolumeErr           error
 	describeVolumesOutput     *ec2.DescribeVolumesOutput
 	describeVolumesErr        error
@@ -111,6 +114,24 @@ func (f *fakeEC2) AttachVolume(_ context.Context, input *ec2.AttachVolumeInput, 
 		return nil, f.attachVolumeErr
 	}
 	return &ec2.AttachVolumeOutput{}, nil
+}
+
+func (f *fakeEC2) CreateVolume(_ context.Context, input *ec2.CreateVolumeInput, _ ...func(*ec2.Options)) (*ec2.CreateVolumeOutput, error) {
+	if f.createVolumeErr != nil {
+		return nil, f.createVolumeErr
+	}
+	id := f.createVolumeID
+	if id == "" {
+		id = "vol-fake"
+	}
+	return &ec2.CreateVolumeOutput{VolumeId: aws.String(id)}, nil
+}
+
+func (f *fakeEC2) DetachVolume(_ context.Context, _ *ec2.DetachVolumeInput, _ ...func(*ec2.Options)) (*ec2.DetachVolumeOutput, error) {
+	if f.detachVolumeErr != nil {
+		return nil, f.detachVolumeErr
+	}
+	return &ec2.DetachVolumeOutput{}, nil
 }
 
 func (f *fakeEC2) DeleteVolume(_ context.Context, input *ec2.DeleteVolumeInput, _ ...func(*ec2.Options)) (*ec2.DeleteVolumeOutput, error) {
