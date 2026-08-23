@@ -524,15 +524,16 @@ func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixtur
 		journalTail := awsE2ERun(t, ctx, target,
 			"journalctl -u "+awsE2EService+" --no-pager | tail -20 | cut -c1-220")
 		t.Logf("no snapshot streamed in round %d; member journal tail:\n%s", round, journalTail.Stdout)
-		// The leader's side decides log-vs-snapshot: dump every member's
-		// snapshot/compaction lines and who leads.
+		// The leader's side decides log-vs-snapshot: dump every peer's
+		// unfiltered tail (snapshot and compaction greps missed a failure mode
+		// once already).
 		for _, other := range f.instances {
 			if other.ID() == target.ID() {
 				continue
 			}
 			out := awsE2ERun(t, ctx, other,
-				"journalctl -u "+awsE2EService+" --no-pager | grep -aE 'compacted|saved snapshot|sending database snapshot|sending snapshot|elected leader|removed member|added member' | tail -10 | cut -c1-220")
-			t.Logf("peer %s snapshot/compaction lines:\n%s", other.ID(), out.Stdout)
+				"journalctl -u "+awsE2EService+" --no-pager | tail -25 | cut -c1-220")
+			t.Logf("peer %s journal tail:\n%s", other.ID(), out.Stdout)
 		}
 	}
 }
