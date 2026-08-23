@@ -71,7 +71,7 @@ run_flavor() {
         --instance-profile "${ETCD_INFRA_AWS_INSTANCE_PROFILE}"
         --binary-url "${url}"
         --binary-sha256 "${sha}"
-        --extra-args "--snapshot-count=10 --snapshot-catchup-entries=10"
+        --extra-args "--snapshot-count=10 --snapshot-catchup-entries=10 --log-level=info"
         --env "GOFAIL_HTTP=127.0.0.1:2234"
         --dry-run=false
     )
