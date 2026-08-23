@@ -816,35 +816,42 @@ func TestSnapDBHardPowerLossAWSE2E(t *testing.T) {
 	t.Logf("%s booted from the fsynced snap.db after a real machine crash", f.state.Instances[targetIdx].Name)
 }
 
-// awsE2EExt2Setup replaces the member's data directory with a loop-mounted
-// ext2 filesystem backed by a file on the root EBS volume. ext2 has no
-// journal, so a WAL fsync after SaveDBFrom returns cannot commit the snap.db
-// rename's metadata as a side effect — the directory entry survives only in
-// the page cache until writeback. A hard crash in that window loses the
-// entry deterministically on unfixed code. On the fixed build the directory
-// fsync flushes through the loop device to EBS, so the entry is durable.
-// The test is self-checking: if the loop device ever stopped forwarding
-// flushes, the fixed build would fail too.
+// awsE2EExt2Setup formats the member's dedicated EBS volume as ext2 and
+// mounts it over the data directory. A real volume, not a loop image: fsyncs
+// inside ext2 must reach EBS, and a loop image's writes sit in the root
+// filesystem's page cache, which a hard crash drops regardless of any fsync
+// inside the loop (observed on newer kernels: the snap.db survived its fsync
+// but the image's dirty pages did not reach EBS).
+//
+// ext2 has no journal, so a WAL fsync after SaveDBFrom returns cannot commit
+// the snap.db rename's metadata as a side effect — the directory entry
+// survives only in the page cache until writeback. A hard crash in that
+// window loses the entry deterministically on unfixed code. On the fixed
+// build the directory fsync flushes to EBS, so the entry is durable.
 //
 // The fstab entry matters: the mount must be restored at boot before the
 // etcd unit starts (its default dependencies order it after local-fs.target),
 // otherwise the member would come up on an empty root-volume directory and
-// rejoin cleanly instead of replaying the crashed state.
+// rejoin cleanly instead of replaying the crashed state. The by-id path is
+// stable across reboots.
 const awsE2EExt2Setup = `
 command -v mkfs.ext2 >/dev/null || yum install -y e2fsprogs || apt-get install -y e2fsprogs
-dd if=/dev/zero of=/var/lib/etcd-data.img bs=1M count=512 status=none
-mkfs.ext2 -F /var/lib/etcd-data.img >/dev/null
+dev="$(lsblk -ndo NAME,SIZE,MOUNTPOINT -p | awk '$2=="2G" && $3=="" {print $1; exit}')"
+[ -n "$dev" ] || { echo "no unmounted 2G volume found" >&2; exit 1; }
+mkfs.ext2 -F "$dev" >/dev/null
 sync
-echo '/var/lib/etcd-data.img /var/lib/etcd ext2 loop,noatime 0 0' >> /etc/fstab
+byid="$(ls -l /dev/disk/by-id/ | awk -v n="$(basename "$dev")" '$NF==n {print "/dev/disk/by-id/"$9}' | head -1)"
+[ -n "$byid" ] || { echo "no by-id link for $dev" >&2; exit 1; }
+echo "$byid /var/lib/etcd ext2 noatime 0 0" >> /etc/fstab
 mount /var/lib/etcd
 `
 
-// awsE2EExt2Teardown unmounts the ext2 filesystem, drops the fstab entry, and
-// removes the backing file, returning the member to the root volume.
-const awsE2EExt2Teardown = `
+// awsE2EExt2TeardownScript unmounts the ext2 volume and drops its fstab
+// entry, returning the member to the root volume. The volume itself is
+// detached and deleted by the test's cleanup.
+const awsE2EExt2TeardownScript = `
 umount /var/lib/etcd
-sed -i '\#etcd-data.img#d' /etc/fstab
-rm -f /var/lib/etcd-data.img
+sed -i '\#disk/by-id/nvme-Amazon#d' /etc/fstab
 `
 
 // awsE2EHardPowerLossNoJournal drives the receive-crash-recover chain with
@@ -862,9 +869,34 @@ func awsE2EHardPowerLossNoJournal(t *testing.T, expectPanic bool) {
 	target := f.instances[targetIdx]
 	targetName := f.state.Instances[targetIdx].Name
 
-	t.Log("reinstall the member with its data dir on a non-journaled (ext2) filesystem")
+	// A dedicated EBS volume for the ext2 data dir: in-volume fsyncs reach
+	// EBS, which a loop image cannot promise.
+	az, err := f.manager.InstanceAZ(ctx, target.ID())
+	require.NoError(t, err)
+	volumeID, err := f.manager.CreateDataVolume(ctx, az, 2, f.state.Name)
+	require.NoError(t, err)
+	require.NoError(t, f.manager.AttachDataVolume(ctx, volumeID, target.ID(), "/dev/xvdf"))
+	t.Cleanup(func() {
+		// Best effort: unmount on the member, then detach and delete the
+		// volume. A failed test must not leak it.
+		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer ccancel()
+		_, _ = target.RunCommandWithOptions(
+			cctx,
+			[]string{"bash", "-ceu", "systemctl stop " + awsE2EService + " || true; umount /var/lib/etcd 2>/dev/null || true; sed -i '\\#disk/by-id/nvme-Amazon#d' /etc/fstab"},
+			&compute.RunCommandOptions{Timeout: time.Minute},
+		)
+		if err := f.manager.DetachDataVolume(cctx, volumeID); err != nil {
+			t.Logf("cleanup: detach %s: %v", volumeID, err)
+		}
+		if err := f.manager.DeleteDataVolume(cctx, volumeID); err != nil {
+			t.Logf("cleanup: delete %s: %v", volumeID, err)
+		}
+	})
+
+	t.Log("reinstall the member with its data dir on a non-journaled (ext2) EBS volume")
 	awsE2EReinstallMember(t, ctx, f, cli, targetIdx, awsE2EExt2Setup)
-	// A mid-test failure would leave the crash-dirty loop mount and its fstab
+	// A mid-test failure would leave the crash-dirty ext2 mount and its fstab
 	// entry, remounting a stale non-journaled filesystem at every later boot.
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -927,7 +959,7 @@ dd if=/dev/null of="$f" conv=fdatasync,notrunc status=none
 	}
 
 	t.Log("restore the member to the root volume")
-	awsE2EReinstallMember(t, ctx, f, cli, targetIdx, awsE2EExt2Teardown)
+	awsE2EReinstallMember(t, ctx, f, cli, targetIdx, awsE2EExt2TeardownScript)
 	assertAWSKVHashEqual(t, ctx, f, cli)
 }
 

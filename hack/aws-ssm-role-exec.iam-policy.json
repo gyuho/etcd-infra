@@ -47,6 +47,15 @@
       ]
     },
     {
+      "Sid": "EC2CreateVolumeTaggedOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateVolume",
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+        "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
       "Sid": "EC2TerminateTaggedOnly",
       "Effect": "Allow",
       "Action": "ec2:TerminateInstances",
@@ -58,7 +67,7 @@
     {
       "Sid": "EC2VolumesForReplace",
       "Effect": "Allow",
-      "Action": ["ec2:AttachVolume", "ec2:DeleteVolume"],
+      "Action": ["ec2:AttachVolume", "ec2:DetachVolume", "ec2:DeleteVolume"],
       "Resource": [
         "arn:aws:ec2:*:*:instance/*",
         "arn:aws:ec2:*:*:volume/*"

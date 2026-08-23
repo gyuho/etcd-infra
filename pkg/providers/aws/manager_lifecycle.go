@@ -496,6 +496,101 @@ func (m *Manager) waitForVolumeAvailable(ctx context.Context, volumeID string, t
 	}
 }
 
+// CreateDataVolume creates a tagged gp3 data volume in the given AZ and
+// waits for it to become available. Returns the volume ID.
+func (m *Manager) CreateDataVolume(ctx context.Context, az string, sizeGB int32, cluster string) (string, error) {
+	if m.ec2 == nil {
+		return "", errors.New("aws: ec2 client is nil")
+	}
+	out, err := m.ec2.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		AvailabilityZone: aws.String(az),
+		Size:             aws.Int32(sizeGB),
+		VolumeType:       types.VolumeTypeGp3,
+		TagSpecifications: []types.TagSpecification{{
+			ResourceType: types.ResourceTypeVolume,
+			Tags:         []types.Tag{{Key: aws.String("etcd-infra.cluster"), Value: aws.String(cluster)}},
+		}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("aws: create data volume in %s: %w", az, err)
+	}
+	volumeID := aws.ToString(out.VolumeId)
+	if err := m.waitForVolumeAvailable(ctx, volumeID, 5*time.Minute); err != nil {
+		return "", err
+	}
+	return volumeID, nil
+}
+
+// AttachDataVolume attaches a volume to an instance and waits for it to be
+// in use. Returns the requested device name.
+func (m *Manager) AttachDataVolume(ctx context.Context, volumeID, instanceID, device string) error {
+	if m.ec2 == nil {
+		return errors.New("aws: ec2 client is nil")
+	}
+	if _, err := m.ec2.AttachVolume(ctx, &ec2.AttachVolumeInput{
+		InstanceId: aws.String(instanceID),
+		VolumeId:   aws.String(volumeID),
+		Device:     aws.String(device),
+	}); err != nil {
+		return fmt.Errorf("aws: attach data volume %s to %s: %w", volumeID, instanceID, err)
+	}
+	return m.waitForVolumeState(ctx, volumeID, types.VolumeStateInUse, 5*time.Minute)
+}
+
+// DetachDataVolume detaches a volume and waits for it to become available.
+func (m *Manager) DetachDataVolume(ctx context.Context, volumeID string) error {
+	if m.ec2 == nil {
+		return errors.New("aws: ec2 client is nil")
+	}
+	if _, err := m.ec2.DetachVolume(ctx, &ec2.DetachVolumeInput{VolumeId: aws.String(volumeID)}); err != nil {
+		return fmt.Errorf("aws: detach data volume %s: %w", volumeID, err)
+	}
+	return m.waitForVolumeAvailable(ctx, volumeID, 5*time.Minute)
+}
+
+// InstanceAZ returns the instance's placement availability zone.
+func (m *Manager) InstanceAZ(ctx context.Context, id string) (string, error) {
+	if m.ec2 == nil {
+		return "", errors.New("aws: ec2 client is nil")
+	}
+	out, err := m.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+	if err != nil {
+		return "", fmt.Errorf("aws: describe instance %s: %w", id, err)
+	}
+	for i := range out.Reservations {
+		for j := range out.Reservations[i].Instances {
+			if az := aws.ToString(out.Reservations[i].Instances[j].Placement.AvailabilityZone); az != "" {
+				return az, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("aws: instance %s not found", id)
+}
+
+// waitForVolumeState waits for a volume to reach the given state.
+func (m *Manager) waitForVolumeState(ctx context.Context, volumeID string, want types.VolumeState, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := m.ec2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{volumeID}})
+		if err != nil {
+			return fmt.Errorf("aws: describe volume %s: %w", volumeID, err)
+		}
+		for _, volume := range out.Volumes {
+			if aws.ToString(volume.VolumeId) == volumeID && volume.State == want {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("aws: volume %s never reached %s", volumeID, want)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // DeleteDataVolume deletes one data volume by ID. The caller passes only
 // volumes it created and recorded; this never sweeps by tag. A missing
 // volume is the desired end state and not an error; an attached volume is
