@@ -20,7 +20,7 @@
         "arn:aws:ec2:*:*:volume/*"
       ],
       "Condition": {
-        "StringEquals": { "ec2:CreateAction": "RunInstances" },
+        "StringEquals": { "ec2:CreateAction": ["RunInstances", "CreateVolume"] },
         "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
       }
     },
