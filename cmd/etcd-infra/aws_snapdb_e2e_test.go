@@ -535,6 +535,9 @@ func awsE2EDriveSnapshot(t *testing.T, ctx context.Context, f awsSnapDBE2EFixtur
 				"journalctl -u "+awsE2EService+" --no-pager | tail -25 | cut -c1-220")
 			t.Logf("peer %s journal tail:\n%s", other.ID(), out.Stdout)
 		}
+		if round == 3 {
+			t.Fatalf("%s: no %s after %d rounds", target.ID(), probeDesc, round)
+		}
 	}
 }
 
