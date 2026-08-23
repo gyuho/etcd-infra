@@ -840,7 +840,10 @@ dev="$(lsblk -ndo NAME,SIZE,MOUNTPOINT -p | awk '$2=="2G" && $3=="" {print $1; e
 [ -n "$dev" ] || { echo "no unmounted 2G volume found" >&2; exit 1; }
 mkfs.ext2 -F "$dev" >/dev/null
 sync
-byid="$(ls -l /dev/disk/by-id/ | awk -v n="$(basename "$dev")" '$NF==n {print "/dev/disk/by-id/"$9}' | head -1)"
+byid=""
+for p in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_*; do
+  [ "$(readlink -f "$p")" = "$dev" ] && byid="$p" && break
+done
 [ -n "$byid" ] || { echo "no by-id link for $dev" >&2; exit 1; }
 echo "$byid /var/lib/etcd ext2 noatime 0 0" >> /etc/fstab
 mount /var/lib/etcd
