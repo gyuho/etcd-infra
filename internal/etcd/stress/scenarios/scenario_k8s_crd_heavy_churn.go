@@ -13,13 +13,22 @@ import (
 	"git.tbd/etcd-infra/pkg/randutil"
 )
 
-// RunK8sCRDHeavyChurn models clusters with many CRDs: CustomResourceDefinition
-// objects carry large OpenAPI validation schemas (tens to hundreds of KB), so
-// the apiserver's writes under
-// /registry/apiextensions.k8s.io/customresourcedefinitions are large-value
-// churn — create, schema updates, delete — with informer watches on the
-// collection. This is the payload shape that dominates write bandwidth and
-// snapshot pressure in CRD-heavy clusters.
+// RunK8sCRDHeavyChurn drives large-value churn of CRD-shaped objects.
+//
+// WHAT: writers create, update, and delete CustomResourceDefinition-shaped
+// objects (64 KB typical, 256 KB for the largest validation schemas) under
+// /registry/apiextensions.k8s.io/customresourcedefinitions, with informer
+// watches on the collection.
+//
+// WHY: clusters with many CRDs write the largest common objects in
+// Kubernetes. This payload shape dominates write bandwidth and snapshot
+// pressure, and it is where the per-mutation forwarding copy that
+// leader-aware removes costs the most peer bandwidth.
+//
+// HOW: each worker creates, updates, and deletes one large object per cycle,
+// paced and capped like a lifecycle workload — the point is the payload
+// size, not the rate. The scenario records every operation's latency and
+// asserts the success rate, the p99 budget, and clean informer delivery.
 func RunK8sCRDHeavyChurn(runner StressRunner) {
 	logutil.S().Infow("running", "scenario", K8sCRDHeavyChurn.String())
 

@@ -11,11 +11,19 @@ import (
 	logutil "git.tbd/etcd-infra/pkg/log"
 )
 
-// RunK8sNodeHeartbeatLeases models kubelet node heartbeats: every node keeps
-// a short-TTL lease under /registry/leases/kube-node-lease/<node> and renews
-// it on a fixed interval (the node-lease pattern from
-// staging/src/k8s.io/kubelet/pkg/nodelease). A steady stream of small,
-// latency-sensitive renewals.
+// RunK8sNodeHeartbeatLeases drives steady short-TTL lease renewals.
+//
+// WHAT: every worker holds one lease-attached key under
+// /registry/leases/kube-node-lease/<node> and renews it on a fixed interval.
+//
+// WHY: this is the kubelet node-heartbeat pattern from
+// staging/src/k8s.io/kubelet/pkg/nodelease — a steady stream of small,
+// latency-sensitive writes that must not degrade as a cluster grows. Leader
+// election and lease expiry depend on these renewals arriving on time.
+//
+// HOW: each worker grants a short-TTL lease, attaches it to its key, and
+// renews with KeepAliveOnce every second. The scenario records every
+// renewal's latency and asserts the success rate and the p99 budget.
 func RunK8sNodeHeartbeatLeases(runner StressRunner) {
 	logutil.S().Infow("running", "scenario", K8sNodeHeartbeatLeases.String())
 

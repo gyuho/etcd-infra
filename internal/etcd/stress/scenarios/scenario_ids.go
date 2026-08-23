@@ -78,4 +78,7 @@ const (
 	// Large CRD objects (OpenAPI validation schemas, tens to hundreds of KB) churned
 	// with informer watches — the payload shape of CRD-heavy clusters.
 	K8sCRDHeavyChurn
+	// K8sJobStorm: the AI/ML gang-scheduling signature — a burst of pod
+	// creates and deletes with no pacing, with informer watches.
+	K8sJobStorm
 )

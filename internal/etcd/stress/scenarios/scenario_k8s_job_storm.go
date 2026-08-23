@@ -13,30 +13,29 @@ import (
 	"git.tbd/etcd-infra/pkg/randutil"
 )
 
-// RunK8sPodLifecycleChurn drives steady pod create, status-update, and
-// delete cycles.
+// RunK8sJobStorm drives a burst of pod creates and deletes in a short window.
 //
-// WHAT: writers create pod-shaped objects (a few KB, matching real pod
-// specs) under /registry/pods/<ns>/<name>, update each twice (the status
-// subresource writes), and delete it. Long-lived prefix watches consume the
-// collection — the informer pattern from
-// staging/src/k8s.io/apiserver/pkg/storage/etcd3/watcher.go.
+// WHAT: every worker creates pod-shaped objects (a few KB, matching real pod
+// specs) under /registry/pods/<ns>/<name> as fast as it can, then deletes
+// them, for the whole scenario window. There is no pacing sleep — the point
+// is the burst. Long-lived prefix watches consume the collection throughout.
 //
-// WHY: this is the steady-state churn of a running cluster: controllers and
-// kubelets create, update, and delete pods continuously. It is the baseline
-// mutation workload that leader-aware routing must serve without added
-// latency.
+// WHY: AI and ML workloads turn Kubernetes writes from a steady stream into
+// storms. Gang schedulers (Kueue, JobSet, TrainJob) create thousands of pods
+// in seconds when a training job starts and delete them when it ends;
+// inference autoscalers churn pods and EndpointSlices on traffic spikes. This
+// is the write-rate spike where leader-aware mutation routing must prove that
+// pinning all writes to the leader does not degrade latency or throughput.
 //
-// HOW: each worker runs create, two status updates, delete, with a short
-// pause between cycles. Churn is a lifecycle workload, not a throughput
-// flood, so the writers are capped regardless of the benchmark's worker
-// scaling. The scenario records every operation's latency and asserts the
-// success rate, the p99 budget, and clean informer delivery.
-func RunK8sPodLifecycleChurn(runner StressRunner) {
-	logutil.S().Infow("running", "scenario", K8sPodLifecycleChurn.String())
+// HOW: writers run create, one status update, delete, with no sleep between
+// cycles. Informers watch the collection. The scenario records every
+// operation's latency and asserts the success rate, the p99 budget, and that
+// the informers saw events with no watch errors.
+func RunK8sJobStorm(runner StressRunner) {
+	logutil.S().Infow("running", "scenario", K8sJobStorm.String())
 
 	result := &Result{
-		Scenario:  K8sPodLifecycleChurn.String(),
+		Scenario:  K8sJobStorm.String(),
 		TimeStart: testtime.Now(),
 		Success:   true,
 		Output:    "ok",
@@ -82,14 +81,13 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 		}()
 	}
 
-	// Pod churn workers: create, two status updates, delete. Churn is a
-	// lifecycle workload, not a throughput flood: even a 10k-node cluster
-	// churns on the order of 100 pods/s, so cap the writers regardless of
-	// the benchmark's worker scaling (which drives the throughput scenarios).
-	workers := min(max(workerCount(cfg), 4), 8)
+	// Storm workers: create, one status update, delete, no pacing. The full
+	// worker count drives the burst — this is the one scenario that does not
+	// cap its writers.
+	workers := max(workerCount(cfg), 8)
 	errs := runWorkers(workers, func(workerID int, _ chan<- error) {
 		for time.Now().Before(deadline) {
-			key := fmt.Sprintf("%s/ns-%02d/pod-%04d", prefix, randutil.Intn(8), randutil.Intn(200))
+			key := fmt.Sprintf("%s/ns-%02d/pod-%06d", prefix, randutil.Intn(8), randutil.Intn(10000))
 			value := randutil.StringAlphabetsLowerCase(valueSize(cfg, 3072))
 
 			//nolint:contextcheck // timeout context for short-lived operation within goroutine
@@ -104,16 +102,14 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 			metrics.RecordBytesWritten(int64(len(value)))
 			cancel()
 
-			for range 2 {
-				ctx, cancel := runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
-				start := time.Now()
-				if _, err := cli.Put(ctx, key, value+"-status"); err != nil {
-					metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
-				} else {
-					metrics.RecordSuccess(float64(time.Since(start).Milliseconds()))
-				}
-				cancel()
+			ctx, cancel = runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
+			start = time.Now()
+			if _, err := cli.Put(ctx, key, value+"-status"); err != nil {
+				metrics.RecordFailure(float64(time.Since(start).Milliseconds()), err.Error())
+			} else {
+				metrics.RecordSuccess(float64(time.Since(start).Milliseconds()))
 			}
+			cancel()
 
 			ctx, cancel = runner.NewCtxTimeout(testtime.ScaleDuration(10 * time.Second))
 			start = time.Now()
@@ -123,8 +119,6 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 				metrics.RecordSuccess(float64(time.Since(start).Milliseconds()))
 			}
 			cancel()
-
-			time.Sleep(20 * time.Millisecond)
 		}
 	})
 
@@ -132,22 +126,22 @@ func RunK8sPodLifecycleChurn(runner StressRunner) {
 	events := eventsReceived.Load()
 	watchErrs := watchErrors.Load()
 
-	stats := finalizeScenario(result, metrics, errs, 0.95, 4000)
+	stats := finalizeScenario(result, metrics, errs, 0.95, 8000)
 	if result.Success {
 		if watchErrs > 0 {
 			result.Success = false
 			result.Output = fmt.Sprintf("watch errors: %d", watchErrs)
 		} else if events == 0 {
 			result.Success = false
-			result.Output = "informers received no events during churn"
+			result.Output = "informers received no events during the job storm"
 		} else {
-			result.Output = fmt.Sprintf("pod lifecycle churn success %.2f%%, p99 %.0fms, informer events %d",
+			result.Output = fmt.Sprintf("job storm success %.2f%%, p99 %.0fms, informer events %d",
 				stats.SuccessRate()*100, stats.P99LatencyMs, events)
 		}
 	}
 
 	logutil.S().Infow("scenario completed",
-		"scenario", K8sPodLifecycleChurn.String(),
+		"scenario", K8sJobStorm.String(),
 		"events", events,
 		"watch_errors", watchErrs,
 	)

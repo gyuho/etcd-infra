@@ -14,11 +14,21 @@ import (
 	"git.tbd/etcd-infra/pkg/randutil"
 )
 
-// RunK8sMixedApiserver composes the real kube-apiserver shape in one
-// scenario: informer list+watches on several resource collections, steady
-// GET reads, bursty pod-churn writes, and node-lease renewals, all
-// concurrently. This is the workload mix where leader-aware mutation routing
-// and watch fan-out interact.
+// RunK8sMixedApiserver drives the full kube-apiserver shape at once.
+//
+// WHAT: informer list+watches on several resource collections, steady GET
+// reads, bursty pod-churn writes, and node-lease renewals, all concurrently.
+//
+// WHY: this is the mix where leader-aware mutation routing and watch fan-out
+// interact: mutations pin to the leader while reads and watches stay on
+// round-robin. It is the closest single scenario to a real apiserver's
+// traffic, so it is the first place a routing regression would show.
+//
+// HOW: each role (watchers, readers, churn writers, lease renewers) runs on
+// its own goroutine, concurrently — runWorkers blocks until its workers
+// finish, so the roles must not be sequential. The scenario records every
+// operation's latency and asserts the success rate, the p99 budget, and
+// clean informer delivery.
 func RunK8sMixedApiserver(runner StressRunner) {
 	logutil.S().Infow("running", "scenario", K8sMixedApiserver.String())
 
