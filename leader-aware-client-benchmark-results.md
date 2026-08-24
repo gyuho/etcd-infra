@@ -26,10 +26,10 @@ Direction of improvement is marked on every metric (↑ higher is better,
 
 | Metric | Round-robin | Leader-aware | Change |
 |---|---:|---:|---:|
-| Throughput, [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) (ops/s, ↑) | 2,779.0 | 3,120.9 | **+12.3%** |
-| p99 latency, [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) (ms, ↓) | 31.17 | 24.17 | **−22.5%** |
-| Peer traffic, AWS mixed suite (bytes/run, ↓) | 11,483,178,909 | 10,516,319,159 | **−8.4%** |
-| Peer traffic, controlled PUT (bytes/PUT, ↓) | 175,458 | 131,584 | **−25.0%** |
+| Throughput, [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) (ops/s, ↑) | 2,834.0 | 3,081.2 | **+8.7%** |
+| p99 latency, K8S_JOB_STORM (ms, ↓) | 32.00 | 24.68 | **−22.9%** |
+| Peer traffic, AWS mixed suite (bytes/run, ↓) | 11,350,526,046 | 10,767,006,481 | **−5.1%** |
+| Peer traffic, controlled PUT (bytes/PUT, ↓) | 175,467 | 131,590 | **−25.0%** |
 
 ## Test setup
 
@@ -43,12 +43,20 @@ Two environments, same comparison: the published etcd v3.7.1 client
 | Network path | published localhost ports | direct private VPC endpoints; no tunnels, no public ingress |
 | Execution | `go test` | binaries shipped via S3, run via SSM Run Command, results collected from S3 |
 
-AWS benchmark shape: each stress client runs the full [26-scenario suite](https://github.com/gyuho/etcd-infra/tree/main/internal/etcd/stress/scenarios); 10
-workers per client, capped at 100 requests/s per worker, 90 seconds per
+AWS benchmark shape: each stress client runs the full [26-scenario
+suite](https://github.com/gyuho/etcd-infra/tree/main/internal/etcd/stress/scenarios);
+10 workers per client, capped at 100 requests/s per worker, 90 seconds per
 scenario. Each client side ran twice in A B B A order (round-robin,
 leader-aware, leader-aware, round-robin) on the same cluster, so slow time
 drift cancels. 312 scenario records total (26 scenarios × 3 stress clients ×
 4 runs); all passed.
+
+Latency aggregation: each scenario run records a mergeable latency histogram
+(log-scale buckets, about 9% resolution, 0.0625 ms–16 s) that counts every
+request. The tables merge those buckets across the three stress clients and
+both runs of each client side, so the reported p99 is the bucket holding the
+fleet-wide 99th-percentile request — not a mean of per-run percentiles.
+Averages are request-weighted.
 
 ## Throughput (higher is better)
 
@@ -57,21 +65,23 @@ runs per client side:
 
 | Scenario | Round-robin ops/s | Leader-aware ops/s | Change |
 |---|---:|---:|---:|
-| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 2,779.0 | 3,120.9 | **+12.3%** |
-| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 1,703.4 | 1,889.8 | **+10.9%** |
-| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 529.7 | 532.1 | +0.5% |
-| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 134.4 | 135.9 | +1.1% |
+| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 2,834.0 | 3,081.2 | **+8.7%** |
+| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 1,739.1 | 1,891.7 | **+8.8%** |
+| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 529.9 | 530.3 | +0.1% |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 191.1 | 191.2 | +0.1% |
+| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 134.8 | 135.3 | +0.4% |
 | [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
 | [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
 
 ```
 ops/s, 3 stress clients combined (higher is better)   round-robin =░  leader-aware =█
-K8S_JOB_STORM            2,779.0 ░░░░░░░░░░░░░░░░░░░░░░░     3,120.9 ██████████████████████████  +12.3%
-K8S_POD_LIFECYCLE_CHURN  1,703.4 ░░░░░░░░░░░░░░              1,889.8 ████████████████            +10.9%
-K8S_MIXED_APISERVER        529.7 ░░░░                          532.1 ████                        +0.5%
-K8S_CRD_HEAVY_CHURN        134.4 ░                             135.9 █                           +1.1%
-CONCURRENT_PUTS            300.3 ░░░                           300.3 ███                         rate-capped
-SUSTAINED_LOAD             300.3 ░░░                           300.3 ███                         rate-capped
+K8S_JOB_STORM              2,834.0 ░░░░░░░░░░░░░░░░░░░░░░░░    3,081.2 ██████████████████████████  +8.7%
+K8S_POD_LIFECYCLE_CHURN    1,739.1 ░░░░░░░░░░░░░░░             1,891.7 ████████████████            +8.8%
+K8S_MIXED_APISERVER          529.9 ░░░░                          530.3 ████                        +0.1%
+K8S_NODE_HEARTBEAT_LEASES    191.1 ░░                            191.2 ██                          +0.1%
+K8S_CRD_HEAVY_CHURN          134.8 ░                             135.3 █                           +0.4%
+CONCURRENT_PUTS              300.3 ░░░                           300.3 ███                         rate-capped
+SUSTAINED_LOAD               300.3 ░░░                           300.3 ███                         rate-capped
 ```
 
 The gain appears only in latency-bound scenarios. The job-storm and pod-churn
@@ -82,34 +92,34 @@ their cap on both clients by construction.
 
 ## Latency (lower is better)
 
-Each stress client reports one average and one p99 per scenario; the table
-shows the arithmetic mean of those values across the three clients and two
-runs. The harness now also records a mergeable latency histogram per scenario
-(log-scale buckets, about 9% resolution) so future runs aggregate a fleet-wide
-distribution instead of averaging per-client percentiles; the numbers below
-pre-date that change and use the mean of per-client values.
+Fleet-wide values from merged latency histograms (bucket upper bounds; about
+9% resolution):
 
 | Scenario | Average ms (rr → la) | p99 ms (rr → la) |
 |---|---:|---:|
-| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 10.29 → 9.12 (**−11.4%**) | 31.17 → 24.17 (**−22.5%**) |
-| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 8.49 → 7.10 (**−16.4%**) | 25.83 → 20.67 (**−20.0%**) |
-| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 2.71 → 2.52 (−7.1%) | 7.83 → 6.83 (−12.8%) |
-| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 4.96 → 3.96 (**−20.3%**) | 20.0 → 14.83 (**−25.8%**) |
-| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 3.63 → 2.81 (**−22.4%**) | 8.50 → 6.50 (**−23.5%**) |
-| [SEQUENTIAL_WRITES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sequential_writes.go) | 4.05 → 3.78 (−6.8%) | 10.00 → 11.17 (+11.7%) |
-| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 3.44 → 2.96 (−14.1%) | 7.67 → 6.50 (−15.2%) |
-| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 0.85 → 0.83 (−2.3%) | 2.33 → 3.50 (+50.0%) |
+| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 10.07 → 9.22 (−8.4%) | 32.00 → 24.68 (**−22.9%**) |
+| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 8.19 → 7.06 (**−13.8%**) | 26.91 → 22.63 (**−15.9%**) |
+| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 2.69 → 2.63 (−2.4%) | 8.72 → 8.72 (0.0%) |
+| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 4.64 → 4.31 (−7.2%) | 19.03 → 17.45 (−8.3%) |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 1.42 → 1.45 (+1.6%) | 5.19 → 5.19 (0.0%) |
+| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 3.40 → 2.78 (**−18.2%**) | 10.37 → 7.34 (**−29.3%**) |
+| [SEQUENTIAL_WRITES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sequential_writes.go) | 4.18 → 3.49 (**−16.4%**) | 12.34 → 9.51 (**−22.9%**) |
+| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 3.52 → 2.95 (**−16.2%**) | 8.72 → 7.34 (**−15.9%**) |
+| LARGE_VALUES | 10.90 → 13.32 (**+22.1%**) | 26.91 → 34.90 (**+29.7%**) |
+| LIST_PAGINATION_HEAVY | 5.96 → 6.65 (+11.5%) | 19.03 → 32.00 (+68.2%) |
 
 ```
 p99 ms (lower is better)   round-robin =░  leader-aware =█
-K8S_JOB_STORM              31.17 ░░░░░░░░░░░░░░░░░░░░░░░░░░  24.17 ████████████████████        −22.5%
-K8S_POD_LIFECYCLE_CHURN    25.83 ░░░░░░░░░░░░░░░░░░░░░░      20.67 █████████████████           −20.0%
-K8S_CRD_HEAVY_CHURN        20.00 ░░░░░░░░░░░░░░░░░           14.83 ████████████                −25.8%
-SUSTAINED_LOAD              8.50 ░░░░░░░                      6.50 █████                       −23.5%
-SEQUENTIAL_WRITES          10.00 ░░░░░░░░                    11.17 █████████                   +11.7%
-CONCURRENT_PUTS             7.67 ░░░░░░                       6.50 █████                       −15.2%
-K8S_MIXED_APISERVER         7.83 ░░░░░░░                      6.83 ██████                      −12.8%
-K8S_NODE_HEARTBEAT_LEASES   2.33 ░░                           3.50 ███                         +50.0%
+K8S_JOB_STORM              32.00 ░░░░░░░░░░░░░░░░░░░░░░░░    24.68 ██████████████████          −22.9%
+K8S_POD_LIFECYCLE_CHURN    26.91 ░░░░░░░░░░░░░░░░░░░░        22.63 █████████████████           −15.9%
+K8S_CRD_HEAVY_CHURN        19.03 ░░░░░░░░░░░░░░              17.45 █████████████               −8.3%
+SUSTAINED_LOAD             10.37 ░░░░░░░░                     7.34 █████                       −29.3%
+SEQUENTIAL_WRITES          12.34 ░░░░░░░░░                    9.51 ███████                     −22.9%
+CONCURRENT_PUTS             8.72 ░░░░░░                       7.34 █████                       −15.9%
+K8S_MIXED_APISERVER         8.72 ░░░░░░                       8.72 ██████                      0.0%
+K8S_NODE_HEARTBEAT_LEASES   5.19 ░░░░                         5.19 ████                        0.0%
+LARGE_VALUES               26.91 ░░░░░░░░░░░░░░░░░░░░        34.90 ██████████████████████████  +29.7%
+LIST_PAGINATION_HEAVY      19.03 ░░░░░░░░░░░░░░              32.00 ████████████████████████    +68.2%
 ```
 
 The mechanism: a mutation that lands on a follower takes the path client →
@@ -118,24 +128,31 @@ leader can process it. Leader-aware routing removes that hop. The p99 gains
 are larger than the average gains, consistent with removing a queueing point
 from the tail.
 
-Two scenarios show a higher p99, and the raw records say why. In
-K8S_NODE_HEARTBEAT_LEASES, five of six per-client p99s sit at 2–4 ms on both
-clients; one leader-aware record read 6 ms (max 7 ms), and on a 2.3 ms
-baseline that single reading out of 720 renewals moves the aggregated p99 to
-3.50 ms. In SEQUENTIAL_WRITES, the shift comes from one leader-aware run
-whose three clients all tailed at 12–13 ms while its requests were otherwise
-as fast. Both scenarios improved on average latency (0.85 → 0.83 ms and
-4.05 → 3.78 ms), and their worst single request was no worse than
-round-robin's (max 7 ms vs 12 ms; 40 ms vs 47 ms). These are tail readings on
-the two lowest-rate scenarios — a mean of six per-client p99s, with no merged
-sample set to absorb one event — not a slower code path: both workloads take
-the same direct-leader route that lowers latency everywhere else in the
-table.
+Two scenarios read worse and the raw records say what each is:
+
+- **LARGE_VALUES** (1 MiB values) regressed consistently across all six
+  leader-aware records, so this is a real cost, not noise: round-robin spreads
+  the ingress of large values across all three members (a follower receives
+  the payload, then forwards it), while leader-aware concentrates every
+  megabyte of client traffic on the leader's receive path on top of its Raft
+  replication sends. At 1 MiB per value, that concentration shows: average
+  +22%, p99 +30%. The change is off by default; write-heavy workloads with
+  megabyte-scale values are the case to measure before opting in.
+- **LIST_PAGINATION_HEAVY** is a read-path scenario, and this change does not
+  touch reads. Its shift came from one leader-aware run whose three clients
+  all read slow (p99 39 ms each); its other run matched round-robin
+  (18–20 ms). Run-level environment variance, not a routing effect.
+
+The earlier run's tail artifacts (a +50% node-lease p99 from one 6 ms reading,
+a +11.7% sequential-writes p99 from one slow run) do not appear here: the
+lease scenario now renews 64 leases (thousands of samples per run, matching
+the one-lease-per-node shape of real clusters), and the merged histograms
+absorb single tail events into the fleet distribution.
 
 Local controlled PUT baseline (loopback, write-only, 720 PUTs per client
-side): round-robin mean 4.53 ms, p99 11.34 ms; leader-aware mean 4.29 ms,
-p99 9.47 ms. This isolates the write path without cross-AZ networking or
-mixed background traffic.
+side): round-robin mean 3.62 ms, p99 18.38 ms; leader-aware mean 3.44 ms,
+p99 13.55 ms. This isolates the write path without cross-AZ networking or
+mixed background traffic; loopback percentiles vary run to run.
 
 ## Peer-to-peer traffic (lower is better)
 
@@ -145,13 +162,13 @@ traffic is not part of this metric.
 
 | Measurement | Round-robin | Leader-aware | Reduction |
 |---|---:|---:|---:|
-| AWS 3-AZ mixed suite (bytes/run) | 11,483,178,909 | 10,516,319,159 | **966,859,750 B (−8.4%)** |
-| Local controlled PUT (bytes/PUT) | 175,458 | 131,584 | **43,874 B (−25.0%)** |
+| AWS 3-AZ mixed suite (bytes/run) | 11,350,526,046 | 10,767,006,481 | **583,519,565 B (−5.1%)** |
+| Local controlled PUT (bytes/PUT) | 175,467 | 131,590 | **43,877 B (−25.0%)** |
 
 ```
 bytes per full suite run (lower is better)   round-robin =░  leader-aware =█
-round-robin   11,483,178,909 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-leader-aware  10,516,319,159 ██████████████████████████████████████████  −8.4%
+round-robin   11,350,526,046 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+leader-aware  10,767,006,481 ████████████████████████████████████████████  −5.1%
 ```
 
 The 25.0% controlled PUT figure is a measured write-only baseline, not the
@@ -160,7 +177,8 @@ cluster: Raft requires two replication copies, and uniform round-robin adds
 one follower-to-leader proposal copy on two thirds of PUTs, so removing it
 saves one quarter of the payload bytes (8/3 copies → 2 copies). The mixed AWS
 suite also carries reads, watches, heartbeats, and elections that this change
-does not touch, so its reduction is smaller: 8.4%.
+does not touch, so its reduction is smaller and moves with the write share
+(5.1% this run; 8.4% on an earlier run with the same suite).
 
 ## Kubernetes scenario notes
 
@@ -183,7 +201,7 @@ does not touch, so its reduction is smaller: 8.4%.
 | AWS cleanup | Post-run checks found 0 running test instances, 0 tagged test volumes, and no local state file; the test code makes no EKS API calls |
 
 Limitations: three-member clusters, fixed instance sizes, 90-second windows,
-generated keys and values. The AWS
-comparison pools two runs per client side; the two leader-aware runs agreed
-within 2.5% on peer traffic. These results show association in this
-benchmark, not a guaranteed production-wide gain.
+generated keys and values. p99 values are bucket upper bounds at about 9%
+resolution. The AWS comparison pools two runs per client side; the two
+leader-aware runs agreed within 3.3% on peer traffic. These results show
+association in this benchmark, not a guaranteed production-wide gain.
