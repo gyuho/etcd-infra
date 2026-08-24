@@ -7,9 +7,9 @@ Scenarios live under `./scenarios`.
 > [!NOTE]
 > **Why etcd conformance matters here.** Kubernetes uses etcd in specific ways that differ from generic etcd usage: it relies on atomic transactions for leader elections, prefix-range watches for controller reflectors, lease-backed bootstrap tokens, and compaction semantics for garbage collection. The conformance suite maps each scenario group directly to a Kubernetes feature area, ensuring every API surface Kubernetes consumes is continuously exercised.
 
-## Coverage Snapshot (October 9, 2025)
+## Coverage Snapshot
 
-- 99 distinct scenarios are implemented in `scenarios/` (see `scenarios/README.md` for the up-to-date catalogue).
+- 132 distinct scenarios are implemented in `scenarios/` (see `scenarios/README.md` for the up-to-date catalogue).
 - Scenario groups map directly to Kubernetes feature areas, ensuring the suite continuously exercises every API surface Kubernetes consumes.
 - Long-running categories are capped with focused scenarios to keep the suite fast and deterministic.
 

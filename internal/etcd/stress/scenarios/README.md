@@ -5,7 +5,7 @@ Package `scenarios` defines stress workloads that mirror Kubernetes etcd usage.
 > [!NOTE]
 > **What "mirrors Kubernetes etcd usage" means concretely.** Kubernetes does not use etcd as a generic key-value store. It submits high-frequency concurrent writes from multiple controllers, bursts of API server requests during scale events, large values for ConfigMaps and Secrets, high-contention transactions during leader election, and sustained watch streams from informer caches. These workloads replicate those patterns under realistic production-like load instead of relying on synthetic benchmarks that miss the same write and contention profile.
 
-21 workloads:
+26 workloads:
 
 | Workload | What it exercises |
 |---|---|
@@ -30,3 +30,8 @@ Package `scenarios` defines stress workloads that mirror Kubernetes etcd usage.
 | `TXN_MULTI_KEY_UPDATE` | Models multi-key Txn batches store.go issues during coordinated updates (e.g., etcd compactor elections) |
 | `LEADER_ELECTION_CONTENTION` | Validates optional helper behavior in clientv3/concurrency leader election |
 | `WATCH_BOOKMARK_HEAVY` | Stresses watcher.go bookmark emission path that powers Kubernetes watch bookmarks for large collections |
+| `K8S_POD_LIFECYCLE_CHURN` | Steady pod create, two status updates, and delete cycles with informer watches; the baseline mutation workload of a running cluster (3 KiB pod-shaped values) |
+| `K8S_NODE_HEARTBEAT_LEASES` | Eight short-TTL leases renewed once per second; the kubelet node-heartbeat pattern |
+| `K8S_MIXED_APISERVER` | Concurrent informer list/watches, cache-miss GETs, pod PUTs, and node-lease renewals; the full kube-apiserver traffic mix in one workload |
+| `K8S_CRD_HEAVY_CHURN` | Create, update, and delete of CRD-sized values with informer watches (64 KiB typical, 256 KiB for 1 in 10); the largest common Kubernetes payload shape |
+| `K8S_JOB_STORM` | Unpaced pod create, status-update, and delete bursts with informer watches; exercises the burst shape of gang-scheduled jobs and autoscaling churn |
