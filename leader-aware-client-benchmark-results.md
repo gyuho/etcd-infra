@@ -65,13 +65,13 @@ runs per client side:
 | SUSTAINED_LOAD | 300.3 | 300.3 | +0.0% (rate-capped) |
 
 ```
-ops/s, 3 stress clients combined (higher is better)   round-robin ░   leader-aware █
-K8S_JOB_STORM          2,779.0 ░░░░░░░░░░░░░░   3,120.9 ████████████████  +12.3%
-K8S_POD_LIFECYCLE_CHURN 1,703.4 ░░░░░░░░░       1,889.8 ██████████        +10.9%
-K8S_MIXED_APISERVER      529.7 ░░░                532.1 ███                +0.5%
-K8S_CRD_HEAVY_CHURN      134.4 ░                  135.9 █                  +1.1%
-CONCURRENT_PUTS          300.3 ░░                 300.3 ██                 rate-capped
-SUSTAINED_LOAD           300.3 ░░                 300.3 ██                 rate-capped
+ops/s, 3 stress clients combined (higher is better)   round-robin =░  leader-aware =█
+K8S_JOB_STORM            2,779.0 ░░░░░░░░░░░░░░░░░░░░░░░     3,120.9 ██████████████████████████  +12.3%
+K8S_POD_LIFECYCLE_CHURN  1,703.4 ░░░░░░░░░░░░░░              1,889.8 ████████████████            +10.9%
+K8S_MIXED_APISERVER        529.7 ░░░░                          532.1 ████                        +0.5%
+K8S_CRD_HEAVY_CHURN        134.4 ░                             135.9 █                           +1.1%
+CONCURRENT_PUTS            300.3 ░░░                           300.3 ███                         rate-capped
+SUSTAINED_LOAD             300.3 ░░░                           300.3 ███                         rate-capped
 ```
 
 The gain appears only in latency-bound scenarios. The job-storm and pod-churn
@@ -98,15 +98,15 @@ runs. This is not a percentile recomputed from merged raw samples.
 | K8S_NODE_HEARTBEAT_LEASES | 0.85 → 0.83 (−2.3%) | 2.33 → 3.50 (+50.0%) |
 
 ```
-p99 ms (lower is better)                              round-robin ░   leader-aware █
-K8S_JOB_STORM           31.17 ░░░░░░░░░░░░░░░░   24.17 █████████████  −22.5%
-K8S_POD_LIFECYCLE_CHURN 25.83 ░░░░░░░░░░░░░    20.67 ███████████     −20.0%
-K8S_CRD_HEAVY_CHURN     20.00 ░░░░░░░░░░       14.83 ████████        −25.8%
-SUSTAINED_LOAD           8.50 ░░░░░             6.50 ████            −23.5%
-SEQUENTIAL_WRITES       10.00 ░░░░░            11.17 █████           +11.7%
-CONCURRENT_PUTS          7.67 ░░░░              6.50 ███             −15.2%
-K8S_MIXED_APISERVER      7.83 ░░░░              6.83 ███             −12.8%
-K8S_NODE_HEARTBEAT_LEASES 2.33 ░                3.50 ██              +50.0%
+p99 ms (lower is better)   round-robin =░  leader-aware =█
+K8S_JOB_STORM              31.17 ░░░░░░░░░░░░░░░░░░░░░░░░░░  24.17 ████████████████████        −22.5%
+K8S_POD_LIFECYCLE_CHURN    25.83 ░░░░░░░░░░░░░░░░░░░░░░      20.67 █████████████████           −20.0%
+K8S_CRD_HEAVY_CHURN        20.00 ░░░░░░░░░░░░░░░░░           14.83 ████████████                −25.8%
+SUSTAINED_LOAD              8.50 ░░░░░░░                      6.50 █████                       −23.5%
+SEQUENTIAL_WRITES          10.00 ░░░░░░░░                    11.17 █████████                   +11.7%
+CONCURRENT_PUTS             7.67 ░░░░░░                       6.50 █████                       −15.2%
+K8S_MIXED_APISERVER         7.83 ░░░░░░░                      6.83 ██████                      −12.8%
+K8S_NODE_HEARTBEAT_LEASES   2.33 ░░                           3.50 ███                         +50.0%
 ```
 
 The mechanism: a mutation that lands on a follower takes the path client →
@@ -134,9 +134,9 @@ traffic is not part of this metric.
 | Local controlled PUT (bytes/PUT) | 175,458 | 131,584 | **43,874 B (−25.0%)** |
 
 ```
-bytes per full suite run (lower is better)
-round-robin   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 11,483,178,909
-leader-aware  ██████████████████████████████████████████ 10,516,319,159  (−8.4%)
+bytes per full suite run (lower is better)   round-robin =░  leader-aware =█
+round-robin   11,483,178,909 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+leader-aware  10,516,319,159 ██████████████████████████████████████████  −8.4%
 ```
 
 The 25.0% controlled PUT figure is a measured write-only baseline, not the
