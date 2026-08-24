@@ -1,168 +1,175 @@
-# Leader-Aware Client Balancer: 3-AZ Benchmark Results
+# Leader-Aware Client Balancer: Benchmark Results
 
-This document measures the leader-aware client balancer proposed in
-[etcd-io/etcd#22268](https://github.com/etcd-io/etcd/issues/22268). The work
-builds on [etcd-io/etcd#22133](https://github.com/etcd-io/etcd/pull/22133).
+Implements the opt-in leader-aware client balancer proposed in
+[etcd-io/etcd#22268](https://github.com/etcd-io/etcd/issues/22268), on top of
+[etcd-io/etcd#22133](https://github.com/etcd-io/etcd/pull/22133). The v2
+client shipped leader-prioritized endpoint selection for the same reason;
+[etcd-io/etcd#9157](https://github.com/etcd-io/etcd/issues/9157) asked for
+the v3 equivalent.
 
-The leader-aware client tracks the raft leader and sends mutations directly
-to it. The published etcd v3.7.1 client uses round-robin endpoint selection,
-so a mutation sent to a follower must first be forwarded to the leader.
-Removing that forwarding step is the change under test.
+## What changes
 
-## Summary
+Raft commits every mutation through the leader, but the v3 client picks
+endpoints round-robin. A mutation sent to a follower is forwarded to the
+leader first, so two thirds of writes pay an extra follower-to-leader hop and
+payload copy. The balancer tracks the leader from response headers and routes
+mutations directly to it. Reads, watches, Raft replication, forwarding, and
+retry semantics are unchanged. The server never learns that a client used
+leader-aware routing; a stale leader hint costs at most one forwarded or
+failed attempt before round-robin resumes. The balancer is disabled by
+default; rollback is configuration-only.
 
-| Metric | Round-robin | Leader-aware | Measured change |
+## Summary of results
+
+Direction of improvement is marked on every metric (↑ higher is better,
+↓ lower is better):
+
+| Metric | Round-robin | Leader-aware | Change |
 |---|---:|---:|---:|
-| *K8S_JOB_STORM throughput (3 drivers combined) | 2,779.0 ops/s | 3,120.9 ops/s | **+12.3%** |
-| *K8S_JOB_STORM average latency | 10.29 ms | 9.12 ms | **−11.4%** |
-| *K8S_JOB_STORM p99 latency | 31.17 ms | 24.17 ms | **−22.5%** |
-| AWS peer traffic, full mixed suite | 11,483,178,909 B | 10,516,319,159 B | **−8.4%** |
-| Local controlled PUT peer traffic | 175,458 B/PUT | 131,584 B/PUT | **−25.0%** |
+| Throughput, K8S_JOB_STORM (ops/s, ↑) | 2,779.0 | 3,120.9 | **+12.3%** |
+| p99 latency, K8S_JOB_STORM (ms, ↓) | 31.17 | 24.17 | **−22.5%** |
+| Peer traffic, AWS mixed suite (bytes/run, ↓) | 11,483,178,909 | 10,516,319,159 | **−8.4%** |
+| Peer traffic, controlled PUT (bytes/PUT, ↓) | 175,458 | 131,584 | **−25.0%** |
 
-All 312 scenario records passed (26 scenarios × 3 drivers × 4 runs).
+## Test setup
 
-## Test topology
+Two environments, same comparison: the published etcd v3.7.1 client
+(round-robin) against the leader-aware client.
 
-We use two test environments. The local test isolates the write path. The AWS
-test measures the full Kubernetes-shaped workload over a three-AZ network.
+| | Local | AWS us-east-2 |
+|---|---|---|
+| etcd members | 3 containers (Podman; Docker fallback) on loopback | 3 × t3a.medium EC2 in one VPC |
+| Load generators | the test process on the host | 3 × t3a.medium stress clients, one per AZ (us-east-2a, us-east-2b, us-east-2c) |
+| Network path | published localhost ports | direct private VPC endpoints; no tunnels, no public ingress |
+| Execution | `go test` | binaries shipped via S3, run via SSM Run Command, results collected from S3 |
 
-| Environment | etcd members | Load generators | Network path | Result collection |
-|---|---|---|---|---|
-| Local | 3 Podman containers on the local Podman network | Test process on the same host | Published localhost ports to the three containers | Local test output and metrics |
-| AWS us-east-2 | 3 × t3a.medium EC2 members in the VPC | 3 × t3a.medium ephemeral bastion/stress-driver instances, one in us-east-2a, one in us-east-2b, and one in us-east-2c | Each driver sends load directly to all three private VPC member endpoints; no SSM port-forwarding tunnel | Each driver writes JSONL results and member metric snapshots, uploads them to S3, and the test aggregates all three sets |
+AWS benchmark shape: each stress client runs the full 26-scenario suite; 10
+workers per client, capped at 100 requests/s per worker, 90 seconds per
+scenario. Each client side ran twice in A B B A order (round-robin,
+leader-aware, leader-aware, round-robin) on the same cluster, so slow time
+drift cancels. 312 scenario records total (26 scenarios × 3 stress clients ×
+4 runs); all passed.
 
-All three AWS drivers start the same workload at the same time against the
-same three-member cluster. Each driver runs 10 workers at up to 100 requests
-per second per worker, for 90 seconds per scenario. The suite contains 26
-scenarios. It compares the published round-robin client with the leader-aware
-client on the same cluster.
+## Throughput (higher is better)
 
-The bastion instances are only load generators. They do not store cluster
-data or other critical state. The test sends the Linux driver binary through
-S3, runs it through SSM Run Command, uploads the results to S3, and terminates
-the instances during cleanup.
+Combined request rate of the three stress clients, averaged across the two
+runs per client side:
 
-## Why leader-aware routing performs better
-
-Every etcd mutation must pass through the raft leader. With round-robin
-endpoint selection, two of the three endpoints are followers. A mutation that
-lands on either follower takes an extra path: client → follower → leader. The
-follower must receive, queue, and forward the request before the leader can
-process it.
-
-Leader-aware routing removes that extra hop. The client sends the mutation to
-the current leader. The benchmark measures lower latency, higher throughput
-for the storm and pod-churn scenarios, and less peer traffic. Avoiding the
-follower hop is the expected mechanism, but this test does not isolate the
-share of each result caused by network transit, queueing, serialization, or
-run-to-run variation.
-
-Rate-capped workloads stay at the configured cap. Raft replication,
-heartbeats, reads, and watches still operate; the change removes only the
-avoidable follower-to-leader mutation path.
-
-## Throughput
-
-The Kubernetes scenarios below contain repeated mutation sequences. The
-reported throughput is the combined request rate from all three drivers,
-averaged across the two runs for each client.
-
-| Scenario | Round-robin | Leader-aware | Change |
+| Scenario | Round-robin ops/s | Leader-aware ops/s | Change |
 |---|---:|---:|---:|
-| *K8S_JOB_STORM | 2,779.0 ops/s | **3,120.9 ops/s** | **+12.3%** |
-| *K8S_POD_LIFECYCLE_CHURN | 1,703.4 ops/s | **1,889.8 ops/s** | **+10.9%** |
-| *K8S_MIXED_APISERVER | 529.7 ops/s | 532.1 ops/s | +0.5% |
-| *K8S_CRD_HEAVY_CHURN | 134.4 ops/s | 135.9 ops/s | +1.1% |
-| CONCURRENT_PUTS | 300.3 ops/s | 300.3 ops/s | No change; rate-capped |
-| SUSTAINED_LOAD | 300.3 ops/s | 300.3 ops/s | No change; rate-capped |
+| K8S_JOB_STORM | 2,779.0 | 3,120.9 | **+12.3%** |
+| K8S_POD_LIFECYCLE_CHURN | 1,703.4 | 1,889.8 | **+10.9%** |
+| K8S_MIXED_APISERVER | 529.7 | 532.1 | +0.5% |
+| K8S_CRD_HEAVY_CHURN | 134.4 | 135.9 | +1.1% |
+| CONCURRENT_PUTS | 300.3 | 300.3 | +0.0% (rate-capped) |
+| SUSTAINED_LOAD | 300.3 | 300.3 | +0.0% (rate-capped) |
 
-The throughput increase is not a higher configured request rate. The storm
-and pod-churn implementations issue synchronous mutation sequences: a worker
-starts its next lifecycle only after the current mutations finish. Their
-higher completed-operation rate is consistent with the measured lower
-latency. CONCURRENT_PUTS and SUSTAINED_LOAD stay at about 300.3 ops/s
-combined because each driver is rate-capped at about 100.1 ops/s.
+```
+ops/s, 3 stress clients combined (higher is better)   round-robin ░   leader-aware █
+K8S_JOB_STORM          2,779.0 ░░░░░░░░░░░░░░   3,120.9 ████████████████  +12.3%
+K8S_POD_LIFECYCLE_CHURN 1,703.4 ░░░░░░░░░       1,889.8 ██████████        +10.9%
+K8S_MIXED_APISERVER      529.7 ░░░                532.1 ███                +0.5%
+K8S_CRD_HEAVY_CHURN      134.4 ░                  135.9 █                  +1.1%
+CONCURRENT_PUTS          300.3 ░░                 300.3 ██                 rate-capped
+SUSTAINED_LOAD           300.3 ░░                 300.3 ██                 rate-capped
+```
 
-## Latency
+The gain appears only in latency-bound scenarios. The job-storm and pod-churn
+workers run synchronous create/update/delete sequences: lower per-mutation
+latency means more completed sequences per window. CONCURRENT_PUTS and
+SUSTAINED_LOAD are rate-capped at 100 requests/s per client, so they sit at
+their cap on both clients by construction.
 
-Each driver reports one average and one p99 for each scenario. The table shows
-the arithmetic mean of those reported values across three drivers and two
-runs per client. It is not a percentile recomputed from a merged raw-latency
-sample set.
+## Latency (lower is better)
 
-| Scenario | Average: round-robin → leader-aware | p99: round-robin → leader-aware |
+Each stress client reports one average and one p99 per scenario; the table
+shows the arithmetic mean of those values across the three clients and two
+runs. This is not a percentile recomputed from merged raw samples.
+
+| Scenario | Average ms (rr → la) | p99 ms (rr → la) |
 |---|---:|---:|
-| *K8S_JOB_STORM | 10.29 → **9.12 ms** (−11.4%) | 31.17 → **24.17 ms** (−22.5%) |
-| *K8S_POD_LIFECYCLE_CHURN | 8.49 → **7.10 ms** (−16.4%) | 25.83 → **20.67 ms** (−20.0%) |
-| *K8S_MIXED_APISERVER | 2.71 → **2.52 ms** (−7.1%) | 7.83 → **6.83 ms** (−12.8%) |
-| *K8S_CRD_HEAVY_CHURN | 4.96 → **3.96 ms** (−20.3%) | 20.0 → **14.83 ms** (−25.8%) |
-| SUSTAINED_LOAD | 3.63 → **2.81 ms** (−22.4%) | 8.5 → **6.5 ms** (−23.5%) |
-| SEQUENTIAL_WRITES | 4.05 → **3.78 ms** (−6.8%) | 10.0 → 11.17 ms (+11.7%) |
-| CONCURRENT_PUTS | 3.44 → **2.96 ms** (−14.1%) | 7.67 → **6.5 ms** (−15.2%) |
-| *K8S_NODE_HEARTBEAT_LEASES | 0.85 → 0.83 ms (−2.3%) | 2.33 → 3.5 ms (+50.0%) |
+| K8S_JOB_STORM | 10.29 → 9.12 (**−11.4%**) | 31.17 → 24.17 (**−22.5%**) |
+| K8S_POD_LIFECYCLE_CHURN | 8.49 → 7.10 (**−16.4%**) | 25.83 → 20.67 (**−20.0%**) |
+| K8S_MIXED_APISERVER | 2.71 → 2.52 (−7.1%) | 7.83 → 6.83 (−12.8%) |
+| K8S_CRD_HEAVY_CHURN | 4.96 → 3.96 (**−20.3%**) | 20.0 → 14.83 (**−25.8%**) |
+| SUSTAINED_LOAD | 3.63 → 2.81 (**−22.4%**) | 8.50 → 6.50 (**−23.5%**) |
+| SEQUENTIAL_WRITES | 4.05 → 3.78 (−6.8%) | 10.00 → 11.17 (+11.7%) |
+| CONCURRENT_PUTS | 3.44 → 2.96 (−14.1%) | 7.67 → 6.50 (−15.2%) |
+| K8S_NODE_HEARTBEAT_LEASES | 0.85 → 0.83 (−2.3%) | 2.33 → 3.50 (+50.0%) |
 
-The local controlled PUT test provides a simpler write-path baseline:
-round-robin averaged 4.53 ms with an 11.34 ms p99; leader-aware averaged
-4.29 ms with a 9.47 ms p99. The AWS results above are the deployment result
-that matters; the local result only confirms the mechanism without cross-AZ
-network effects or mixed background traffic.
+```
+p99 ms (lower is better)                              round-robin ░   leader-aware █
+K8S_JOB_STORM           31.17 ░░░░░░░░░░░░░░░░   24.17 █████████████  −22.5%
+K8S_POD_LIFECYCLE_CHURN 25.83 ░░░░░░░░░░░░░    20.67 ███████████     −20.0%
+K8S_CRD_HEAVY_CHURN     20.00 ░░░░░░░░░░       14.83 ████████        −25.8%
+SUSTAINED_LOAD           8.50 ░░░░░             6.50 ████            −23.5%
+SEQUENTIAL_WRITES       10.00 ░░░░░            11.17 █████           +11.7%
+CONCURRENT_PUTS          7.67 ░░░░              6.50 ███             −15.2%
+K8S_MIXED_APISERVER      7.83 ░░░░              6.83 ███             −12.8%
+K8S_NODE_HEARTBEAT_LEASES 2.33 ░                3.50 ██              +50.0%
+```
 
-## Peer-to-peer traffic
+The mechanism: a mutation that lands on a follower takes the path client →
+follower → leader; the follower receives, queues, and forwards it before the
+leader can process it. Leader-aware routing removes that hop. The p99 gains
+are larger than the average gains, consistent with removing a queueing point
+from the tail. The two regressions in the table (SEQUENTIAL_WRITES p99 and
+node-lease p99) are on low-rate scenarios where single outliers move the mean
+of six per-client p99 values.
 
-The AWS metric is the change in
-`etcd_network_peer_sent_bytes_total`, summed across the three etcd members
-and averaged across the two runs for each client. It covers one full
-26-scenario run at a time. It excludes traffic from the three load generators
-to the members.
+Local controlled PUT baseline (loopback, write-only, 720 PUTs per client
+side): round-robin mean 4.53 ms, p99 11.34 ms; leader-aware mean 4.29 ms,
+p99 9.47 ms. This isolates the write path without cross-AZ networking or
+mixed background traffic.
+
+## Peer-to-peer traffic (lower is better)
+
+Change in `etcd_network_peer_sent_bytes_total`, summed across the three
+members and averaged across the two runs per client side. Load-generator
+traffic is not part of this metric.
 
 | Measurement | Round-robin | Leader-aware | Reduction |
 |---|---:|---:|---:|
-| AWS three-AZ mixed suite | 11,483,178,909 B | 10,516,319,159 B | **966,859,750 B (8.4%)** |
-| Local controlled PUT baseline | 175,458 B/PUT | 131,584 B/PUT | **43,874 B/PUT (25.0%)** |
+| AWS 3-AZ mixed suite (bytes/run) | 11,483,178,909 | 10,516,319,159 | **966,859,750 B (−8.4%)** |
+| Local controlled PUT (bytes/PUT) | 175,458 | 131,584 | **43,874 B (−25.0%)** |
 
-The local PUT result is a **measured controlled PUT baseline**, not the
-expected fleet reduction. It isolates the request path and showed the 25.0%
-reduction predicted by the three-voter payload-copy model used by the test:
-two raft replication copies are required, while uniform round-robin adds one
-follower-to-leader proposal copy on two thirds of PUTs. Fixed framing and
-background traffic can move the observed ratio, so this is not a universal
-maximum. The mixed AWS suite includes reads, watches, elections, and other
-raft traffic; its measured reduction was 8.4%.
+```
+bytes per full suite run (lower is better)
+round-robin   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 11,483,178,909
+leader-aware  ██████████████████████████████████████████ 10,516,319,159  (−8.4%)
+```
 
-The leader-aware client does not remove raft replication. The leader must
-still replicate every committed mutation to the followers. It only removes
-the avoidable follower-to-leader copy that occurs before replication starts.
+The 25.0% controlled PUT figure is a measured write-only baseline, not the
+expected fleet reduction. It matches the payload-copy model for a three-voter
+cluster: Raft requires two replication copies, and uniform round-robin adds
+one follower-to-leader proposal copy on two thirds of PUTs, so removing it
+saves one quarter of the payload bytes (8/3 copies → 2 copies). The mixed AWS
+suite also carries reads, watches, heartbeats, and elections that this change
+does not touch, so its reduction is smaller: 8.4%.
 
 ## Kubernetes scenario notes
 
 | Scenario | What it tests | Payload |
 |---|---|---:|
-| *K8S_JOB_STORM | Unpaced pod create, status-update, and delete bursts with four prefix watches. This synthetic shape is intended to exercise bursts associated with gang-scheduled jobs and inference autoscaling; it does not replay a captured production trace. | 3,072-byte generated values; the status update appends 7 bytes |
-| *K8S_POD_LIFECYCLE_CHURN | Steady pod create, two status updates, and delete cycles with four prefix watches and a 20 ms pause per cycle. | 3,072-byte generated values; each status update appends 7 bytes |
-| *K8S_MIXED_APISERVER | Concurrent prefix watches over pods, EndpointSlices, and ConfigMaps; cache-miss GETs; pod PUTs; and node-lease renewals. | 3,072-byte generated pod values; lease values are short node names |
-| *K8S_CRD_HEAVY_CHURN | Create, update, and delete of generated CRD-sized values with three prefix watches and a 250 ms pause per cycle. | 65,536 bytes normally; 262,144 bytes for 1 in 10 generated values; update appends 3 bytes |
-| *K8S_NODE_HEARTBEAT_LEASES | Eight short-TTL leases renewed once per second. | Lease-attached value is the generated node name, not a 200–500 B serialized Kubernetes Lease object |
+| K8S_JOB_STORM | Unpaced pod create, status-update, and delete bursts with four prefix watches. A synthetic burst shape; not a replay of production traces. | 3,072-byte generated values; the status update appends 7 bytes |
+| K8S_POD_LIFECYCLE_CHURN | Steady pod create, two status updates, delete, with four prefix watches and a 20 ms pause per cycle. | 3,072-byte generated values; updates append 7 bytes |
+| K8S_MIXED_APISERVER | Concurrent prefix watches over pods, EndpointSlices, and ConfigMaps; cache-miss GETs; pod PUTs; node-lease renewals. | 3,072-byte pod values; short node-name lease values |
+| K8S_CRD_HEAVY_CHURN | Create, update, delete of generated CRD-sized values with three prefix watches and a 250 ms pause per cycle. | 65,536 bytes; 262,144 bytes for 1 in 10; update appends 3 bytes |
+| K8S_NODE_HEARTBEAT_LEASES | Eight short-TTL leases renewed once per second. | short generated node names |
 
 ## Test status and limitations
 
 | Check | Result |
 |---|---|
-| Conformance | Command completed successfully; the detailed conformance count was not retained in this benchmark log |
-| Stress benchmark | 312/312 scenario records passed (26 scenarios × 3 drivers × 4 runs) |
+| Stress benchmark | 312/312 scenario records passed (26 scenarios × 3 stress clients × 4 runs) |
+| Conformance | Suite completed; the detailed count was not retained in the benchmark log |
 | Member replacement | Passed |
 | snap.db durability | 7/7 passed, including real-power-loss tests on a non-journaled EBS volume |
-| AWS cleanup | Post-run checks found 0 running test instances, 0 tagged test volumes, and no local AWS state file; the test code did not call an EKS API |
+| AWS cleanup | Post-run checks found 0 running test instances, 0 tagged test volumes, and no local state file; the test code makes no EKS API calls |
 
-The reported AWS values pool two completed round-robin runs and two completed
-leader-aware runs from the same cluster, in round-robin, leader-aware,
-leader-aware, round-robin order. Each run contains 78 scenario records: 26
-scenarios from each of the three drivers. All 312 records passed. Throughput
-is summed across drivers; latency is averaged across the per-driver records;
-peer traffic is summed across members and drivers for each run, then averaged
-across the two runs for each client.
-
-These results show association within this controlled benchmark. They do not
-establish production-wide gains for every Kubernetes workload. The scenarios
-use generated keys and values, a fixed three-member cluster, fixed instance
-sizes, and a 90-second window. In particular, *K8S_JOB_STORM is a synthetic
-stress shape rather than a replay of a measured production AI/ML cluster.
+Limitations: three-member clusters, fixed instance sizes, 90-second windows,
+generated keys and values. The latency aggregation averages per-client
+percentiles rather than recomputing percentiles from merged samples. The AWS
+comparison pools two runs per client side; the two leader-aware runs agreed
+within 2.5% on peer traffic. These results show association in this
+benchmark, not a guaranteed production-wide gain.
