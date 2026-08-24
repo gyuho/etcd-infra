@@ -9,6 +9,13 @@ Two clients are compared: the published etcd v3.7.1 client (round-robin) and
 the leader-aware client from the fork. Zero failed operations on every
 scenario.
 
+The change under test is the leader-aware client balancer: the client tracks
+the raft leader and sends mutations to it directly, instead of round-robin
+through a follower. It implements the proposal in
+[etcd-io/etcd#22268](https://github.com/etcd-io/etcd/issues/22268), and the
+work builds on the base branch in
+[etcd-io/etcd#22133](https://github.com/etcd-io/etcd/pull/22133).
+
 ## Peer-to-peer traffic
 
 Bytes the etcd members sent to each other during one full suite run:
