@@ -915,8 +915,12 @@ func awsE2EHardPowerLossNoJournal(t *testing.T, expectPanic bool) {
 	})
 	assertAWSKVHashEqual(t, ctx, f, cli)
 
-	t.Log("arm apply to pause before consuming the snap.db (applyBeforeOpenSnapshot=sleep(60s))")
-	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=applyBeforeOpenSnapshot=sleep("60s")`)
+	// The pause must outlive the whole pre-crash window: the WAL quiescence
+	// loop plus SSM crash delivery can exceed 60 s, and a crash after the
+	// pause expires means apply consumed the snap.db and no crash-window
+	// outcome is observable.
+	t.Log("arm apply to pause before consuming the snap.db (applyBeforeOpenSnapshot=sleep(300s))")
+	awsE2EArmFailpoint(t, ctx, target, `GOFAIL_FAILPOINTS=applyBeforeOpenSnapshot=sleep("300s")`)
 	awsE2EDisarmFailpointOnCleanup(t, target)
 	awsE2EWaitMemberHealthy(t, ctx, cli, f.endpoints[targetIdx])
 
