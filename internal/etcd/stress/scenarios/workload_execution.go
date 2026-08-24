@@ -152,6 +152,7 @@ func finalizeScenario(result *Result, metrics *MetricsCollector, errs []error, m
 	result.MaxLatency = testtime.Duration{Duration: time.Duration(stats.MaxLatencyMs * float64(time.Millisecond))}
 	result.BytesWritten = stats.BytesWritten
 	result.BytesRead = stats.BytesRead
+	result.LatencyBuckets = metrics.LatencyBuckets()
 
 	if len(errs) > 0 {
 		result.Success = false

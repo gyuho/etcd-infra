@@ -13,6 +13,17 @@ const (
 	// maxLatencySamples limits memory growth via reservoir sampling.
 	// 100k samples provides excellent percentile accuracy while preventing unbounded growth.
 	maxLatencySamples = 100_000
+
+	// latencyBucketMinMs, latencyBucketStepsPerOctave, and latencyBucketCount
+	// define the mergeable latency histogram: bucket i covers
+	// [min*2^(i/8), min*2^((i+1)/8)) milliseconds — about 9% resolution —
+	// from 0.0625 ms to 16 s. Bucket counts sum across runs, so aggregated
+	// percentiles come from every request, not from a mean of per-run
+	// percentiles. The aggregation in hack/aws-stress-benchmark.sh mirrors
+	// these constants; change them together.
+	latencyBucketMinMs          = 0.0625
+	latencyBucketStepsPerOctave = 8
+	latencyBucketCount          = 145
 )
 
 // MetricsCollector collects metrics in a thread-safe manner
@@ -30,9 +41,30 @@ type MetricsCollector struct {
 	latencies    []float64
 	totalSamples int64 // Total samples seen (including those not in reservoir)
 
+	// Mergeable latency histogram: lock-free bucket counts, exact for every
+	// request (not reservoir-sampled), so results from separate runs can be
+	// summed into a fleet-wide distribution.
+	latencyBuckets [latencyBucketCount]atomic.Int64
+
 	// Error tracking
 	errorsMu sync.RWMutex
 	errors   map[string]int
+}
+
+// latencyBucketIndex returns the histogram bucket for a latency in
+// milliseconds, clamped to the representable range.
+func latencyBucketIndex(latencyMs float64) int {
+	if latencyMs <= latencyBucketMinMs {
+		return 0
+	}
+	idx := int(math.Floor(latencyBucketStepsPerOctave * math.Log2(latencyMs/latencyBucketMinMs)))
+	return min(max(idx, 0), latencyBucketCount-1)
+}
+
+// LatencyBucketUpperBoundMs returns the exclusive upper bound of bucket i in
+// milliseconds.
+func LatencyBucketUpperBoundMs(i int) float64 {
+	return latencyBucketMinMs * math.Pow(2, float64(i+1)/latencyBucketStepsPerOctave)
 }
 
 // NewMetricsCollector creates a new metrics collector.
@@ -75,6 +107,10 @@ func (m *MetricsCollector) Reset() {
 	m.failureCount.Store(0)
 	m.bytesWritten.Store(0)
 	m.bytesRead.Store(0)
+
+	for i := range m.latencyBuckets {
+		m.latencyBuckets[i].Store(0)
+	}
 
 	m.latenciesMu.Lock()
 	m.totalSamples = 0
@@ -142,6 +178,8 @@ func (m *MetricsCollector) GetStatistics() Statistics {
 
 // recordLatency adds a latency sample using reservoir sampling to prevent unbounded growth.
 func (m *MetricsCollector) recordLatency(latencyMs float64) {
+	m.latencyBuckets[latencyBucketIndex(latencyMs)].Add(1)
+
 	m.latenciesMu.Lock()
 	defer m.latenciesMu.Unlock()
 
@@ -158,6 +196,17 @@ func (m *MetricsCollector) recordLatency(latencyMs float64) {
 			m.latencies[j] = latencyMs
 		}
 	}
+}
+
+// LatencyBuckets returns a copy of the mergeable latency histogram. Buckets
+// from independent collectors sum element-wise into a fleet-wide
+// distribution.
+func (m *MetricsCollector) LatencyBuckets() []int64 {
+	buckets := make([]int64, latencyBucketCount)
+	for i := range buckets {
+		buckets[i] = m.latencyBuckets[i].Load()
+	}
+	return buckets
 }
 
 // SuccessRate returns the success rate.

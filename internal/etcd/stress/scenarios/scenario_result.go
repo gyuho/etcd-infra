@@ -32,6 +32,12 @@ type Result struct {
 	P99Latency     testtime.Duration `json:"p99Latency"`
 	MaxLatency     testtime.Duration `json:"maxLatency"`
 
+	// LatencyBuckets is the mergeable latency histogram (bucket i covers
+	// [0.0625*2^(i/8), 0.0625*2^((i+1)/8)) ms; see metrics.go). Counts from
+	// separate runs sum into a fleet-wide distribution for exact aggregated
+	// percentiles.
+	LatencyBuckets []int64 `json:"latencyBuckets,omitempty" yaml:"latencyBuckets,omitempty"`
+
 	// Throughput with clear units
 	RequestsPerSecond float64 `json:"requestsPerSecond"`
 

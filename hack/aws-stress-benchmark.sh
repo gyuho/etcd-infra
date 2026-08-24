@@ -140,12 +140,21 @@ for legdir in sorted(glob.glob(os.path.join(root, "*"))):
                 if not line.startswith("{"): continue
                 rec = json.loads(line)
                 sc = rec["scenario"]
-                cur = scenarios.setdefault(sc, {"requests": 0, "p99": 0.0, "avg": 0.0, "secs": 0.0, "n": 0, "failed": 0})
+                cur = scenarios.setdefault(sc, {"requests": 0, "p99": 0.0, "avg": 0.0, "wavg": 0.0, "secs": 0.0, "n": 0, "failed": 0, "buckets": None})
                 cur["requests"] += rec.get("totalRequests", 0)
                 cur["p99"] += parse_duration(rec.get("p99Latency", "0s"))
                 cur["avg"] += parse_duration(rec.get("averageLatency", "0s"))
+                cur["wavg"] += parse_duration(rec.get("averageLatency", "0s")) * rec.get("totalRequests", 0)
                 cur["secs"] += parse_duration(rec.get("took", "0s"))
                 cur["n"] += 1
+                # Mergeable latency histogram (see metrics.go): counts sum
+                # across clients and runs, so aggregated percentiles come
+                # from every request, not from a mean of per-run percentiles.
+                if rec.get("latencyBuckets"):
+                    if cur["buckets"] is None:
+                        cur["buckets"] = [0] * len(rec["latencyBuckets"])
+                    for i, count in enumerate(rec["latencyBuckets"]):
+                        cur["buckets"][i] += count
                 if not rec.get("success", False):
                     cur["failed"] += 1
         except FileNotFoundError:
@@ -160,9 +169,14 @@ def pool(prefix):
         n += 1
         out["peer"] += data["peer"]
         for sc, m in data["scenarios"].items():
-            cur = out["scenarios"].setdefault(sc, {"requests": 0, "p99": 0.0, "avg": 0.0, "secs": 0.0, "n": 0, "failed": 0})
-            for k in ("requests", "p99", "avg", "secs", "n", "failed"):
+            cur = out["scenarios"].setdefault(sc, {"requests": 0, "p99": 0.0, "avg": 0.0, "wavg": 0.0, "secs": 0.0, "n": 0, "failed": 0, "buckets": None})
+            for k in ("requests", "p99", "avg", "wavg", "secs", "n", "failed"):
                 cur[k] += m[k]
+            if m["buckets"] is not None:
+                if cur["buckets"] is None:
+                    cur["buckets"] = [0] * len(m["buckets"])
+                for i, count in enumerate(m["buckets"]):
+                    cur["buckets"][i] += count
     if n: out["peer"] /= n
     return out
 
@@ -185,7 +199,21 @@ for sc in sorted(set(off["scenarios"]) | set(cust["scenarios"])):
     c = cust["scenarios"].get(sc)
     if not o or not c: continue
     def ops(m): return m["requests"] / m["secs"] if m["secs"] else 0
-    def lat(m, k): return m[k] / m["n"] if m["n"] else 0
+    def lat(m, k):
+        # With the mergeable histogram, the p99 is the upper bound of the
+        # bucket holding the 99th-percentile request across all runs (about
+        # 9% resolution), and the average is request-weighted. Without it
+        # (older result files), fall back to the mean of per-run values.
+        if k == "p99" and m["buckets"]:
+            total = sum(m["buckets"])
+            threshold, cumulative = total * 0.99, 0
+            for i, count in enumerate(m["buckets"]):
+                cumulative += count
+                if cumulative >= threshold:
+                    return 0.0625 * 2 ** ((i + 1) / 8) / 1000
+        if k == "avg" and m["requests"]:
+            return m["wavg"] / m["requests"]
+        return m[k] / m["n"] if m["n"] else 0
     fails = o["failed"] + c["failed"]
     print(f"{sc:40s} {ops(o):10.1f} {ops(c):10.1f} {lat(o,'p99'):9.2f} {lat(c,'p99'):9.2f} {lat(o,'avg'):9.2f} {lat(c,'avg'):9.2f} {fails:6d}")
 PYEOF

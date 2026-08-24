@@ -84,7 +84,10 @@ their cap on both clients by construction.
 
 Each stress client reports one average and one p99 per scenario; the table
 shows the arithmetic mean of those values across the three clients and two
-runs. This is not a percentile recomputed from merged raw samples.
+runs. The harness now also records a mergeable latency histogram per scenario
+(log-scale buckets, about 9% resolution) so future runs aggregate a fleet-wide
+distribution instead of averaging per-client percentiles; the numbers below
+pre-date that change and use the mean of per-client values.
 
 | Scenario | Average ms (rr → la) | p99 ms (rr → la) |
 |---|---:|---:|
@@ -180,8 +183,7 @@ does not touch, so its reduction is smaller: 8.4%.
 | AWS cleanup | Post-run checks found 0 running test instances, 0 tagged test volumes, and no local state file; the test code makes no EKS API calls |
 
 Limitations: three-member clusters, fixed instance sizes, 90-second windows,
-generated keys and values. The latency aggregation averages per-client
-percentiles rather than recomputing percentiles from merged samples. The AWS
+generated keys and values. The AWS
 comparison pools two runs per client side; the two leader-aware runs agreed
 within 2.5% on peer traffic. These results show association in this
 benchmark, not a guaranteed production-wide gain.
