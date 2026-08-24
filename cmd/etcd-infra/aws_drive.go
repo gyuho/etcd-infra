@@ -258,7 +258,10 @@ func selectStressClients(state awsState, sel string) ([]awsInstanceState, error)
 }
 
 // printDriveSummary prints one line per client: suite outcome and the
-// peer-sent bytes the run consumed (summed across members).
+// peer-sent bytes the run consumed (summed across members) — then the
+// cross-client aggregate: the clients ran the same suite concurrently
+// against the same cluster, so their results merge into one fleet-wide
+// picture (aggregateDriveResults).
 func printDriveSummary(dir string, targets []awsInstanceState) {
 	fmt.Println()
 	fmt.Println("=== drive summary ===")
@@ -287,6 +290,7 @@ func printDriveSummary(dir string, targets []awsInstanceState) {
 		}
 		fmt.Printf("%-44s peer-sent-bytes %14s   %s\n", client.Name, peer, outcome)
 	}
+	printDriveAggregate(aggregateDriveResults(dir, targets))
 }
 
 // readMetricFile reads a one-number metrics file; -1 when absent or invalid.
