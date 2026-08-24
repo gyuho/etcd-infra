@@ -167,7 +167,7 @@ does not touch, so its reduction is smaller: 8.4%.
 | [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | Steady pod create, two status updates, delete, with four prefix watches and a 20 ms pause per cycle. | 3,072-byte generated values; updates append 7 bytes |
 | [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | Concurrent prefix watches over pods, EndpointSlices, and ConfigMaps; cache-miss GETs; pod PUTs; node-lease renewals. | 3,072-byte pod values; short node-name lease values |
 | [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | Create, update, delete of generated CRD-sized values with three prefix watches and a 250 ms pause per cycle. | 65,536 bytes; 262,144 bytes for 1 in 10; update appends 3 bytes |
-| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | Eight short-TTL leases renewed once per second. | short generated node names |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 64 short-TTL leases renewed once per second. | short generated node names |
 
 ## Test status and limitations
 

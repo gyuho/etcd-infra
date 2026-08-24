@@ -55,7 +55,11 @@ func RunK8sNodeHeartbeatLeases(runner StressRunner) {
 	duration := scenarioDuration(cfg)
 	deadline := time.Now().Add(duration)
 
-	nodes := 8
+	// 64 leases at one renewal per second yields thousands of samples per
+	// run, so the p99 is stable across runs; 8 leases left the tail to single
+	// readings. Real clusters renew one lease per node, so a larger count is
+	// also the more realistic shape.
+	nodes := 64
 	var renewals atomic.Int64
 
 	errs := runWorkers(nodes, func(workerID int, _ chan<- error) {
