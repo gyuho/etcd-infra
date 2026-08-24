@@ -26,7 +26,7 @@ Direction of improvement is marked on every metric (↑ higher is better,
 
 | Metric | Round-robin | Leader-aware | Change |
 |---|---:|---:|---:|
-| Throughput, [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) (ops/s, ↑) | 2,834.0 | 3,081.2 | **+8.7%** |
+| Throughput, [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) (ops/s, ↑) | 2,834.0 | 3,081.2 | **+8.7%** |
 | p99 latency, K8S_JOB_STORM (ms, ↓) | 32.00 | 24.68 | **−22.9%** |
 | Peer traffic, AWS mixed suite (bytes/run, ↓) | 11,350,526,046 | 10,767,006,481 | **−5.1%** |
 | Peer traffic, controlled PUT (bytes/PUT, ↓) | 175,467 | 131,590 | **−25.0%** |
@@ -44,7 +44,7 @@ Two environments, same comparison: the published etcd v3.7.1 client
 | Execution | `go test` | binaries shipped via S3, run via SSM Run Command, results collected from S3 |
 
 AWS benchmark shape: each stress client runs the full [26-scenario
-suite](https://github.com/gyuho/etcd-infra/tree/main/internal/etcd/stress/scenarios);
+suite](https://github.com/gyuho/etcd-infra/tree/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios);
 10 workers per client, capped at 100 requests/s per worker, 90 seconds per
 scenario. Each client side ran twice in A B B A order (round-robin,
 leader-aware, leader-aware, round-robin) on the same cluster, so slow time
@@ -65,13 +65,13 @@ runs per client side:
 
 | Scenario | Round-robin ops/s | Leader-aware ops/s | Change |
 |---|---:|---:|---:|
-| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 2,834.0 | 3,081.2 | **+8.7%** |
-| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 1,739.1 | 1,891.7 | **+8.8%** |
-| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 529.9 | 530.3 | +0.1% |
-| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 191.1 | 191.2 | +0.1% |
-| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 134.8 | 135.3 | +0.4% |
-| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
-| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
+| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 2,834.0 | 3,081.2 | **+8.7%** |
+| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 1,739.1 | 1,891.7 | **+8.8%** |
+| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 529.9 | 530.3 | +0.1% |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 191.1 | 191.2 | +0.1% |
+| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 134.8 | 135.3 | +0.4% |
+| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
+| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 300.3 | 300.3 | +0.0% (rate-capped) |
 
 ```
 ops/s, 3 stress clients combined (higher is better)   round-robin =░  leader-aware =█
@@ -97,14 +97,14 @@ Fleet-wide values from merged latency histograms (bucket upper bounds; about
 
 | Scenario | Average ms (rr → la) | p99 ms (rr → la) |
 |---|---:|---:|
-| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 10.07 → 9.22 (−8.4%) | 32.00 → 24.68 (**−22.9%**) |
-| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 8.19 → 7.06 (**−13.8%**) | 26.91 → 22.63 (**−15.9%**) |
-| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 2.69 → 2.63 (−2.4%) | 8.72 → 8.72 (0.0%) |
-| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 4.64 → 4.31 (−7.2%) | 19.03 → 17.45 (−8.3%) |
-| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 1.42 → 1.45 (+1.6%) | 5.19 → 5.19 (0.0%) |
-| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 3.40 → 2.78 (**−18.2%**) | 10.37 → 7.34 (**−29.3%**) |
-| [SEQUENTIAL_WRITES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_sequential_writes.go) | 4.18 → 3.49 (**−16.4%**) | 12.34 → 9.51 (**−22.9%**) |
-| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 3.52 → 2.95 (**−16.2%**) | 8.72 → 7.34 (**−15.9%**) |
+| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | 10.07 → 9.22 (−8.4%) | 32.00 → 24.68 (**−22.9%**) |
+| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | 8.19 → 7.06 (**−13.8%**) | 26.91 → 22.63 (**−15.9%**) |
+| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | 2.69 → 2.63 (−2.4%) | 8.72 → 8.72 (0.0%) |
+| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | 4.64 → 4.31 (−7.2%) | 19.03 → 17.45 (−8.3%) |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 1.42 → 1.45 (+1.6%) | 5.19 → 5.19 (0.0%) |
+| [SUSTAINED_LOAD](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_sustained_load.go) | 3.40 → 2.78 (**−18.2%**) | 10.37 → 7.34 (**−29.3%**) |
+| [SEQUENTIAL_WRITES](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_sequential_writes.go) | 4.18 → 3.49 (**−16.4%**) | 12.34 → 9.51 (**−22.9%**) |
+| [CONCURRENT_PUTS](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_concurrent_puts.go) | 3.52 → 2.95 (**−16.2%**) | 8.72 → 7.34 (**−15.9%**) |
 | LARGE_VALUES | 10.90 → 13.32 (**+22.1%**) | 26.91 → 34.90 (**+29.7%**) |
 | LIST_PAGINATION_HEAVY | 5.96 → 6.65 (+11.5%) | 19.03 → 32.00 (+68.2%) |
 
@@ -184,11 +184,11 @@ does not touch, so its reduction is smaller and moves with the write share
 
 | Scenario | What it tests | Payload |
 |---|---|---:|
-| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | Unpaced pod create, status-update, and delete bursts with four prefix watches. A synthetic burst shape; not a replay of production traces. | 3,072-byte generated values; the status update appends 7 bytes |
-| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | Steady pod create, two status updates, delete, with four prefix watches and a 20 ms pause per cycle. | 3,072-byte generated values; updates append 7 bytes |
-| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | Concurrent prefix watches over pods, EndpointSlices, and ConfigMaps; cache-miss GETs; pod PUTs; node-lease renewals. | 3,072-byte pod values; short node-name lease values |
-| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | Create, update, delete of generated CRD-sized values with three prefix watches and a 250 ms pause per cycle. | 65,536 bytes; 262,144 bytes for 1 in 10; update appends 3 bytes |
-| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/main/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 64 short-TTL leases renewed once per second. | short generated node names |
+| [K8S_JOB_STORM](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_job_storm.go) | Unpaced pod create, status-update, and delete bursts with four prefix watches. A synthetic burst shape; not a replay of production traces. | 3,072-byte generated values; the status update appends 7 bytes |
+| [K8S_POD_LIFECYCLE_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_pod_lifecycle_churn.go) | Steady pod create, two status updates, delete, with four prefix watches and a 20 ms pause per cycle. | 3,072-byte generated values; updates append 7 bytes |
+| [K8S_MIXED_APISERVER](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_mixed_apiserver.go) | Concurrent prefix watches over pods, EndpointSlices, and ConfigMaps; cache-miss GETs; pod PUTs; node-lease renewals. | 3,072-byte pod values; short node-name lease values |
+| [K8S_CRD_HEAVY_CHURN](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_crd_heavy_churn.go) | Create, update, delete of generated CRD-sized values with three prefix watches and a 250 ms pause per cycle. | 65,536 bytes; 262,144 bytes for 1 in 10; update appends 3 bytes |
+| [K8S_NODE_HEARTBEAT_LEASES](https://github.com/gyuho/etcd-infra/blob/3cf13c64c5822fdecdc429e7758d6c9c510c0a0b/internal/etcd/stress/scenarios/scenario_k8s_node_heartbeat_leases.go) | 64 short-TTL leases renewed once per second. | short generated node names |
 
 ## Test status and limitations
 
