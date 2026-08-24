@@ -113,9 +113,21 @@ The mechanism: a mutation that lands on a follower takes the path client →
 follower → leader; the follower receives, queues, and forwards it before the
 leader can process it. Leader-aware routing removes that hop. The p99 gains
 are larger than the average gains, consistent with removing a queueing point
-from the tail. The two regressions in the table (SEQUENTIAL_WRITES p99 and
-node-lease p99) are on low-rate scenarios where single outliers move the mean
-of six per-client p99 values.
+from the tail.
+
+Two scenarios show a higher p99, and the raw records say why. In
+K8S_NODE_HEARTBEAT_LEASES, five of six per-client p99s sit at 2–4 ms on both
+clients; one leader-aware record read 6 ms (max 7 ms), and on a 2.3 ms
+baseline that single reading out of 720 renewals moves the aggregated p99 to
+3.50 ms. In SEQUENTIAL_WRITES, the shift comes from one leader-aware run
+whose three clients all tailed at 12–13 ms while its requests were otherwise
+as fast. Both scenarios improved on average latency (0.85 → 0.83 ms and
+4.05 → 3.78 ms), and their worst single request was no worse than
+round-robin's (max 7 ms vs 12 ms; 40 ms vs 47 ms). These are tail readings on
+the two lowest-rate scenarios — a mean of six per-client p99s, with no merged
+sample set to absorb one event — not a slower code path: both workloads take
+the same direct-leader route that lowers latency everywhere else in the
+table.
 
 Local controlled PUT baseline (loopback, write-only, 720 PUTs per client
 side): round-robin mean 4.53 ms, p99 11.34 ms; leader-aware mean 4.29 ms,
