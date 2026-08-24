@@ -84,6 +84,13 @@ CONCURRENT_PUTS              300.3 ░░░                           300.3 █
 SUSTAINED_LOAD               300.3 ░░░                           300.3 ███                         rate-capped
 ```
 
+The table counts individual etcd operations, not whole lifecycles: every
+create Put, status-update Put, and Delete records separately. One
+K8S_JOB_STORM cycle is 3 operations (create, one status update, delete) and
+one K8S_POD_LIFECYCLE_CHURN cycle is 4 (create, two status updates, delete),
+so 3,081.2 ops/s is about 1,027 complete storm cycles per second across the
+three stress clients.
+
 The gain appears only in latency-bound scenarios. The job-storm and pod-churn
 workers run synchronous create/update/delete sequences: lower per-mutation
 latency means more completed sequences per window. CONCURRENT_PUTS and
