@@ -49,6 +49,18 @@ one extra container port per member as `containerPort:firstHostPort`:
   --aux-port 2234:33479
 ```
 
+To keep experimental or private-branch flags out of shell history, scripts,
+and git, pass them in a file instead: `--extra-args-file` (default
+`$ETCD_INFRA_EXTRA_ARGS_FILE`) reads one argument per line, ignores blank
+lines and `#` comments, and passes each line verbatim — values with spaces
+need no quoting. File entries are appended before `--extra-args`, so a
+repeated inline flag overrides the file entry:
+
+```bash
+./bin/etcd-infra local up --image localhost/my-etcd:dev \
+  --extra-args-file ~/private/etcd-flags
+```
+
 ## Snapshot durability E2E (snap.db dir fsync)
 
 `./hack/snapdb-e2e.sh` validates the snap.db directory-fsync fix
@@ -326,4 +338,8 @@ scenario and stress-tuning overrides are listed in the script header.
 `aws up` also accepts `--binary-url` with `--binary-sha256` to install a
 custom etcd binary (for example a gofail-enabled fork build) instead of a
 release tarball, `--extra-args` to append etcd server flags, and `--env` for
-comma-separated KEY=VALUE variables in the etcd systemd unit.
+comma-separated KEY=VALUE variables in the etcd systemd unit. Like `local
+up`, it accepts `--extra-args-file` (default `$ETCD_INFRA_EXTRA_ARGS_FILE`)
+to read flags from a file, one per line, keeping private-branch flags out of
+shell history and scripts; the resolved flags are recorded in the local state
+file (mode 0600) so `aws replace` can reproduce a member exactly.

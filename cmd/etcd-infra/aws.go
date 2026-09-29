@@ -35,6 +35,7 @@ type awsUpOptions struct {
 	BinaryURL          string
 	BinarySHA256       string
 	ExtraArgs          string
+	ExtraArgsFile      string
 	Env                string
 	Members            int
 	DryRun             bool
@@ -113,6 +114,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 	flags.StringVar(&opts.BinaryURL, "binary-url", "", "download a custom etcd binary from this URL instead of the release tarball (requires --binary-sha256)")
 	flags.StringVar(&opts.BinarySHA256, "binary-sha256", "", "SHA-256 checksum of the --binary-url download")
 	flags.StringVar(&opts.ExtraArgs, "extra-args", "", "space-separated extra arguments appended to the etcd server command")
+	flags.StringVar(&opts.ExtraArgsFile, "extra-args-file", os.Getenv(extraArgsFileEnv), "file with extra etcd server arguments, one per line (default: $"+extraArgsFileEnv+")")
 	flags.StringVar(&opts.Env, "env", "", "comma-separated KEY=VALUE environment variables for the etcd systemd unit")
 	flags.IntVar(&opts.Members, "members", 3, "cluster member count (1 or 3)")
 	flags.IntVar(&opts.StressClients, "stress-clients", 1, "in-VPC stress client (driver) instances; suites run there — no tunnels, no public etcd ingress; >1 spreads across the VPC's subnets")
@@ -124,6 +126,10 @@ func runAWSUp(ctx context.Context, args []string) error {
 	}
 	opts.SecurityGroupIDs = splitCSV(securityGroups)
 	if err := validateAWSUpOptions(opts); err != nil {
+		return err
+	}
+	extraArgs, err := resolveExtraArgs(opts.ExtraArgs, opts.ExtraArgsFile)
+	if err != nil {
 		return err
 	}
 
@@ -166,7 +172,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 		Region:       opts.Region,
 		Version:      opts.Version,
 		Arch:         opts.Arch,
-		ExtraArgs:    strings.Fields(opts.ExtraArgs),
+		ExtraArgs:    extraArgs,
 		Env:          splitCSV(opts.Env),
 		BinaryURL:    opts.BinaryURL,
 		BinarySHA256: opts.BinarySHA256,
@@ -308,7 +314,7 @@ func runAWSUp(ctx context.Context, args []string) error {
 		Arch:            opts.Arch,
 		BinaryURL:       opts.BinaryURL,
 		BinarySHA256:    opts.BinarySHA256,
-		ExtraArgs:       strings.Fields(opts.ExtraArgs),
+		ExtraArgs:       extraArgs,
 		Env:             splitCSV(opts.Env),
 		DataVolumeSetup: opts.Replaceable,
 	}

@@ -55,12 +55,17 @@ func runLocalUp(ctx context.Context, args []string) error {
 	port := flags.Int("port", 2379, "first host client port")
 	image := flags.String("image", "", "container image override (defaults to the gcr.io release image for --version)")
 	extraArgs := flags.String("extra-args", "", "space-separated extra arguments appended to the etcd server command")
+	extraArgsFile := flags.String("extra-args-file", os.Getenv(extraArgsFileEnv), "file with extra etcd server arguments, one per line (default: $"+extraArgsFileEnv+")")
 	env := flags.String("env", "", "comma-separated KEY=VALUE environment variables for the etcd containers")
 	auxPort := flags.String("aux-port", "", "publish one extra container port as containerPort:firstHostPort (host port increments per member)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if err := validateLocalOptions(*name, *memberCount, *port); err != nil {
+		return err
+	}
+	serverArgs, err := resolveExtraArgs(*extraArgs, *extraArgsFile)
+	if err != nil {
 		return err
 	}
 	envVars, err := parseLocalEnv(*env)
@@ -100,7 +105,7 @@ func runLocalUp(ctx context.Context, args []string) error {
 	manager := localprovider.New(runtime, *name, 0)
 	for i, member := range members {
 		command := append([]string{"/usr/local/bin/etcd"}, etcdServerArgs(member, members, *name, localprovider.DataDir)...)
-		command = append(command, strings.Fields(*extraArgs)...)
+		command = append(command, serverArgs...)
 		createConfig := localprovider.CreateConfig{Command: command, Env: envVars}
 		if auxMapping != nil {
 			mapping := *auxMapping
