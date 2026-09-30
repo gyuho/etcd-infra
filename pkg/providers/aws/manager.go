@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -51,6 +52,7 @@ type Manager struct {
 	sts    stsAPI
 	lt     launchTemplateAPI
 	groups groupAPI
+	iam    iamAPI
 }
 
 type ec2API interface {
@@ -92,6 +94,7 @@ func New(cfg aws.Config) *Manager {
 		sts:    sts.NewFromConfig(cfg),
 		lt:     ec2Client,
 		groups: asgClient,
+		iam:    iam.NewFromConfig(cfg),
 	}
 }
 

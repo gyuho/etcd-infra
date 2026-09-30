@@ -130,8 +130,8 @@ Use least-privilege credentials: `hack/aws-e2e.iam-policy.json` is fully
 portable — every ARN wildcards account and region, and no per-account
 resource IDs appear, so the same file attaches unchanged in any AWS account.
 Only one naming convention must pre-exist in the account: an
-instance-profile role named `etcd-infra-ssm` with
-`AmazonSSMManagedInstanceCore` attached. The S3 upload bucket needs no setup:
+instance-profile role named `etcd-infra-ssm` (created by `etcd-infra aws iam
+up`, below). The S3 upload bucket needs no setup:
 `hack/aws-snapdb-e2e.sh` derives the name as
 `etcd-infra-e2e-<account>-<region>-v0-<YYYYMM>` — deterministic within a
 month, rotated by name — and creates it with public access blocked on first
@@ -143,38 +143,53 @@ key presence with any value, so the user can also drive another engineer's
 etcd-infra cluster in the same account; everything without the tag, EKS
 included, is unreachable.
 
-Setup in a fresh account (any region):
+### IAM setup: `etcd-infra aws iam`
+
+One command, run once with administrator credentials, creates the
+least-privilege user every other command should run as, attaches the policy,
+and sets up the instance role (any region; IAM is global):
 
 ```bash
-# instance-profile role the test instances run as (SSM-driven orchestration)
-aws iam create-role --role-name etcd-infra-ssm --assume-role-policy-document '{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"},
-    "Action": "sts:AssumeRole"}]
-}'
-aws iam attach-role-policy --role-name etcd-infra-ssm \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-aws iam attach-role-policy --role-name etcd-infra-ssm \
-  --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-# the suites execute on the stress clients, so the role also carries the
-# tag-scoped execution permissions (documented, least-privilege)
-aws iam create-policy --policy-name etcd-infra-ssm-exec \
-  --policy-document file://hack/aws-ssm-role-exec.iam-policy.json
-aws iam attach-role-policy --role-name etcd-infra-ssm \
-  --policy-arn arn:aws:iam::<account-id>:policy/etcd-infra-ssm-exec
-aws iam create-instance-profile --instance-profile-name etcd-infra-ssm
-aws iam add-role-to-instance-profile --instance-profile-name etcd-infra-ssm \
-  --role-name etcd-infra-ssm
+etcd-infra aws iam up                             # plan only (default --dry-run)
+etcd-infra aws iam up --dry-run=false --access-key
+aws configure set aws_access_key_id <access_key_id> --profile etcd-infra-aws-e2e
+aws configure set aws_secret_access_key <secret_access_key> --profile etcd-infra-aws-e2e
+export AWS_PROFILE=etcd-infra-aws-e2e ETCD_INFRA_AWS_INSTANCE_PROFILE=etcd-infra-ssm
 
-# the least-privilege user
-aws iam create-user --user-name etcd-infra-aws-e2e
-aws iam create-policy --policy-name etcd-infra-aws-e2e \
-  --policy-document file://hack/aws-e2e.iam-policy.json
-aws iam attach-user-policy --user-name etcd-infra-aws-e2e \
-  --policy-arn arn:aws:iam::<account-id>:policy/etcd-infra-aws-e2e
-aws iam create-access-key --user-name etcd-infra-aws-e2e
+etcd-infra aws iam status                         # key=value; ready=true when converged
+etcd-infra aws iam down [--role]                  # admin credentials again
 ```
+
+`up` is idempotent and applies the reviewed files embedded from `hack/`, so
+editing a policy file and rerunning `up` is how a policy change rolls out (it
+adds a new default policy version and prunes the oldest once IAM's
+five-version limit is reached; `status` reports `current=false` for a stale
+policy). It converges:
+
+- policy `etcd-infra-aws-e2e` = `hack/aws-e2e.iam-policy.json`;
+- user `etcd-infra-aws-e2e` (`--user` for another name) with that policy
+  attached **and set as its permissions boundary**, so the user can never
+  exceed the policy even if something broader is attached later;
+- with `--role` (default): role and instance profile `etcd-infra-ssm` (EC2
+  trust) with `AmazonSSMManagedInstanceCore`, `AmazonS3ReadOnlyAccess`, and
+  policy `etcd-infra-ssm-exec` = `hack/aws-ssm-role-exec.iam-policy.json`
+  (the suites execute on the stress clients, so the role carries the same
+  tag-scoped execution permissions). The name is fixed: the user policy only
+  allows `iam:PassRole` on `role/etcd-infra-ssm`;
+- with `--access-key`: a new access key, printed once on stdout (IAM allows
+  two per user).
+
+Everything `up` creates is tagged `etcd-infra.managed-by=etcd-infra-aws-iam`,
+and `down` deletes only tagged resources: the user (with its access keys,
+console password, MFA devices, and other credentials) and its policy, plus
+with `--role` the instance profile, role, and exec policy (running etcd-infra
+instances then lose SSM, so the default keeps them). Resources that already
+existed without the tag, e.g. made by hand, are adopted by `up` (policies
+attached, documents updated, boundary set if it had none) but never deleted;
+a policy still attached elsewhere, or a role still in an untagged instance
+profile, is kept. `up` refuses to run as the target user itself, to replace
+a different boundary an adopted user already has (it may be stricter), and
+to run outside the `aws` partition (the policies use `arn:aws:` ARNs).
 
 The AWS CLI region must match the bucket's region for uploads and presigned
 URLs; the scripts already require `AWS_REGION`.
@@ -453,7 +468,8 @@ already exists without its owner token, and leaves that group untouched.
 State left by the earlier single-instance `aws dev` is still torn down by
 `dev down` (terminate and wait); other commands ask you to recreate it.
 
-IAM (`hack/aws-e2e.iam-policy.json`; re-apply after upgrading): launch
+IAM (`hack/aws-e2e.iam-policy.json`; after upgrading, rerun
+`etcd-infra aws iam up --dry-run=false` to roll it out): launch
 templates and Auto Scaling groups may only be created with, and managed
 when carrying, the `etcd-infra.cluster` tag; groups must pin a template
 version (`autoscaling:LaunchTemplateVersionSpecified`);

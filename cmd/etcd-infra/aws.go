@@ -83,7 +83,7 @@ type awsInstanceState struct {
 
 func runAWS(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: etcd-infra aws <up|down|status|drive|replace|dev>")
+		return errors.New("usage: etcd-infra aws <up|down|status|drive|replace|dev|iam>")
 	}
 
 	switch args[0] {
@@ -99,6 +99,8 @@ func runAWS(ctx context.Context, args []string) error {
 		return runAWSReplace(ctx, args[1:])
 	case "dev":
 		return runAWSDev(ctx, args[1:])
+	case "iam":
+		return runAWSIAM(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown aws command %q", args[0])
 	}

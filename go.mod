@@ -70,6 +70,7 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.78.1
+	github.com/aws/aws-sdk-go-v2/service/iam v1.64.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.0
 )
 
