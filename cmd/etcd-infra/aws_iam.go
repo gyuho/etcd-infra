@@ -568,6 +568,7 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 	if err != nil {
 		return err
 	}
+	deletedProfile := false
 	switch {
 	case profile == nil:
 		fmt.Fprintf(out, "instance_profile=absent\n")
@@ -578,6 +579,7 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 		if err := c.DeleteInstanceProfile(ctx, awsIAMRoleName); err != nil {
 			return err
 		}
+		deletedProfile = true
 		fmt.Fprintf(out, "instance_profile=deleted\n")
 	}
 	role, err := c.Role(ctx, awsIAMRoleName)
@@ -592,10 +594,14 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 		fmt.Fprintf(out, "role=kept\n")
 	default:
 		// Deleting the role would empty every profile holding it; only the
-		// profile deleted above is ours to change.
+		// profile deleted above is ours to change. IAM lists are eventually
+		// consistent, so that profile may still be listed: ignore it.
 		profiles, err := c.RoleInstanceProfiles(ctx, awsIAMRoleName)
 		if err != nil {
 			return err
+		}
+		if deletedProfile {
+			profiles = slices.DeleteFunc(profiles, func(p string) bool { return p == awsIAMRoleName })
 		}
 		if len(profiles) > 0 {
 			fmt.Fprintf(log, "role %s is still in instance profile(s) %s not created by 'aws iam up'; leaving it\n", awsIAMRoleName, strings.Join(profiles, ", "))

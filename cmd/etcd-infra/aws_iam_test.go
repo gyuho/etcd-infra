@@ -24,6 +24,8 @@ type fakeIAMAccount struct {
 	profiles map[string]*awsprovider.IAMInstanceProfile
 	users    map[string]*fakeIAMUser
 	creates  []string
+	// staleRoleProfiles are listed for every role, like a lagging IAM read.
+	staleRoleProfiles []string
 }
 
 type fakeIAMPolicy struct {
@@ -140,7 +142,7 @@ func (f *fakeIAMAccount) RoleInstanceProfiles(_ context.Context, role string) ([
 			names = append(names, name)
 		}
 	}
-	return names, nil
+	return append(names, f.staleRoleProfiles...), nil
 }
 
 func (f *fakeIAMAccount) DeleteRole(_ context.Context, name string) error {
@@ -342,6 +344,8 @@ func TestAWSIAMDownDeletesManagedResources(t *testing.T) {
 	assert.Contains(t, acct.roles, awsIAMRoleName)
 
 	target.IncludeRole = true
+	// IAM may still list the profile down deletes; that must not keep the role.
+	acct.staleRoleProfiles = []string{awsIAMRoleName}
 	out, err = runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDown(ctx, acct, target, o, l) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "instance_profile=deleted\nrole=deleted\nrole_exec_policy=deleted\n")
