@@ -1,10 +1,9 @@
 package aws
 
-// IAM building blocks for "etcd-infra aws iam": idempotent create/inspect
-// helpers for customer-managed policies, roles, instance profiles, and
-// users, plus complete deletion. Ownership decisions (which resources may
-// be deleted) belong to the caller; every Delete* here deletes what it is
-// told to, and treats "already gone" as success.
+// IAM building blocks for "etcd-infra aws iam create-user": idempotent
+// create/inspect helpers for customer-managed policies, roles, instance
+// profiles, and users. Nothing here deletes a policy, role, profile, or
+// user.
 
 import (
 	"context"
@@ -15,7 +14,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -32,11 +30,6 @@ const (
 	PolicyUnchanged = "unchanged"
 )
 
-var (
-	iamDetachSettleTimeout = 60 * time.Second
-	iamPollInterval        = 3 * time.Second
-)
-
 type iamAPI interface {
 	GetPolicy(ctx context.Context, input *iam.GetPolicyInput, optFns ...func(*iam.Options)) (*iam.GetPolicyOutput, error)
 	CreatePolicy(ctx context.Context, input *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
@@ -44,59 +37,29 @@ type iamAPI interface {
 	ListPolicyVersions(ctx context.Context, input *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
 	CreatePolicyVersion(ctx context.Context, input *iam.CreatePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyVersionOutput, error)
 	DeletePolicyVersion(ctx context.Context, input *iam.DeletePolicyVersionInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyVersionOutput, error)
-	DeletePolicy(ctx context.Context, input *iam.DeletePolicyInput, optFns ...func(*iam.Options)) (*iam.DeletePolicyOutput, error)
 
 	GetRole(ctx context.Context, input *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
 	CreateRole(ctx context.Context, input *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
 	AttachRolePolicy(ctx context.Context, input *iam.AttachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error)
 	ListAttachedRolePolicies(ctx context.Context, input *iam.ListAttachedRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
-	DetachRolePolicy(ctx context.Context, input *iam.DetachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DetachRolePolicyOutput, error)
-	ListRolePolicies(ctx context.Context, input *iam.ListRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error)
-	DeleteRolePolicy(ctx context.Context, input *iam.DeleteRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteRolePolicyOutput, error)
-	ListInstanceProfilesForRole(ctx context.Context, input *iam.ListInstanceProfilesForRoleInput, optFns ...func(*iam.Options)) (*iam.ListInstanceProfilesForRoleOutput, error)
-	DeleteRole(ctx context.Context, input *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
 
 	GetInstanceProfile(ctx context.Context, input *iam.GetInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error)
 	CreateInstanceProfile(ctx context.Context, input *iam.CreateInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.CreateInstanceProfileOutput, error)
 	AddRoleToInstanceProfile(ctx context.Context, input *iam.AddRoleToInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.AddRoleToInstanceProfileOutput, error)
-	RemoveRoleFromInstanceProfile(ctx context.Context, input *iam.RemoveRoleFromInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.RemoveRoleFromInstanceProfileOutput, error)
-	DeleteInstanceProfile(ctx context.Context, input *iam.DeleteInstanceProfileInput, optFns ...func(*iam.Options)) (*iam.DeleteInstanceProfileOutput, error)
 
 	GetUser(ctx context.Context, input *iam.GetUserInput, optFns ...func(*iam.Options)) (*iam.GetUserOutput, error)
 	CreateUser(ctx context.Context, input *iam.CreateUserInput, optFns ...func(*iam.Options)) (*iam.CreateUserOutput, error)
 	AttachUserPolicy(ctx context.Context, input *iam.AttachUserPolicyInput, optFns ...func(*iam.Options)) (*iam.AttachUserPolicyOutput, error)
 	ListAttachedUserPolicies(ctx context.Context, input *iam.ListAttachedUserPoliciesInput, optFns ...func(*iam.Options)) (*iam.ListAttachedUserPoliciesOutput, error)
-	DetachUserPolicy(ctx context.Context, input *iam.DetachUserPolicyInput, optFns ...func(*iam.Options)) (*iam.DetachUserPolicyOutput, error)
-	ListUserPolicies(ctx context.Context, input *iam.ListUserPoliciesInput, optFns ...func(*iam.Options)) (*iam.ListUserPoliciesOutput, error)
-	DeleteUserPolicy(ctx context.Context, input *iam.DeleteUserPolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteUserPolicyOutput, error)
 	PutUserPermissionsBoundary(ctx context.Context, input *iam.PutUserPermissionsBoundaryInput, optFns ...func(*iam.Options)) (*iam.PutUserPermissionsBoundaryOutput, error)
 	ListAccessKeys(ctx context.Context, input *iam.ListAccessKeysInput, optFns ...func(*iam.Options)) (*iam.ListAccessKeysOutput, error)
 	CreateAccessKey(ctx context.Context, input *iam.CreateAccessKeyInput, optFns ...func(*iam.Options)) (*iam.CreateAccessKeyOutput, error)
-	DeleteAccessKey(ctx context.Context, input *iam.DeleteAccessKeyInput, optFns ...func(*iam.Options)) (*iam.DeleteAccessKeyOutput, error)
-	DeleteLoginProfile(ctx context.Context, input *iam.DeleteLoginProfileInput, optFns ...func(*iam.Options)) (*iam.DeleteLoginProfileOutput, error)
-	ListMFADevices(ctx context.Context, input *iam.ListMFADevicesInput, optFns ...func(*iam.Options)) (*iam.ListMFADevicesOutput, error)
-	DeactivateMFADevice(ctx context.Context, input *iam.DeactivateMFADeviceInput, optFns ...func(*iam.Options)) (*iam.DeactivateMFADeviceOutput, error)
-	DeleteVirtualMFADevice(ctx context.Context, input *iam.DeleteVirtualMFADeviceInput, optFns ...func(*iam.Options)) (*iam.DeleteVirtualMFADeviceOutput, error)
-	ListSSHPublicKeys(ctx context.Context, input *iam.ListSSHPublicKeysInput, optFns ...func(*iam.Options)) (*iam.ListSSHPublicKeysOutput, error)
-	DeleteSSHPublicKey(ctx context.Context, input *iam.DeleteSSHPublicKeyInput, optFns ...func(*iam.Options)) (*iam.DeleteSSHPublicKeyOutput, error)
-	ListSigningCertificates(ctx context.Context, input *iam.ListSigningCertificatesInput, optFns ...func(*iam.Options)) (*iam.ListSigningCertificatesOutput, error)
-	DeleteSigningCertificate(ctx context.Context, input *iam.DeleteSigningCertificateInput, optFns ...func(*iam.Options)) (*iam.DeleteSigningCertificateOutput, error)
-	ListServiceSpecificCredentials(ctx context.Context, input *iam.ListServiceSpecificCredentialsInput, optFns ...func(*iam.Options)) (*iam.ListServiceSpecificCredentialsOutput, error)
-	DeleteServiceSpecificCredential(ctx context.Context, input *iam.DeleteServiceSpecificCredentialInput, optFns ...func(*iam.Options)) (*iam.DeleteServiceSpecificCredentialOutput, error)
-	ListGroupsForUser(ctx context.Context, input *iam.ListGroupsForUserInput, optFns ...func(*iam.Options)) (*iam.ListGroupsForUserOutput, error)
-	RemoveUserFromGroup(ctx context.Context, input *iam.RemoveUserFromGroupInput, optFns ...func(*iam.Options)) (*iam.RemoveUserFromGroupOutput, error)
-	DeleteUser(ctx context.Context, input *iam.DeleteUserInput, optFns ...func(*iam.Options)) (*iam.DeleteUserOutput, error)
 }
 
-// IAMPolicy describes a customer-managed policy.
-type IAMPolicy struct {
+// iamPolicy identifies a customer-managed policy's default version.
+type iamPolicy struct {
 	ARN            string
 	DefaultVersion string
-	Tags           map[string]string
-	// Attachments counts users, groups, and roles with the policy attached;
-	// BoundaryUses counts principals using it as permissions boundary.
-	Attachments  int32
-	BoundaryUses int32
 }
 
 // IAMRole describes a role.
@@ -134,36 +97,21 @@ func (m *Manager) iamClient() (iamAPI, error) {
 	return m.iam, nil
 }
 
-// ManagedPolicy returns the policy, or nil when it does not exist.
-func (m *Manager) ManagedPolicy(ctx context.Context, arn string) (*IAMPolicy, error) {
-	client, err := m.iamClient()
-	if err != nil {
-		return nil, err
-	}
-	out, err := client.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(arn)})
+// managedPolicy returns the policy, or nil when it does not exist.
+func (m *Manager) managedPolicy(ctx context.Context, arn string) (*iamPolicy, error) {
+	out, err := m.iam.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(arn)})
 	if isIAMNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("aws: get policy %s: %w", arn, err)
 	}
-	p := out.Policy
-	return &IAMPolicy{
-		ARN:            aws.ToString(p.Arn),
-		DefaultVersion: aws.ToString(p.DefaultVersionId),
-		Tags:           iamTagMap(p.Tags),
-		Attachments:    aws.ToInt32(p.AttachmentCount),
-		BoundaryUses:   aws.ToInt32(p.PermissionsBoundaryUsageCount),
-	}, nil
+	return &iamPolicy{ARN: aws.ToString(out.Policy.Arn), DefaultVersion: aws.ToString(out.Policy.DefaultVersionId)}, nil
 }
 
-// PolicyDocument returns the decoded document of a policy version.
-func (m *Manager) PolicyDocument(ctx context.Context, arn, versionID string) (string, error) {
-	client, err := m.iamClient()
-	if err != nil {
-		return "", err
-	}
-	out, err := client.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{PolicyArn: aws.String(arn), VersionId: aws.String(versionID)})
+// policyDocument returns the decoded document of a policy version.
+func (m *Manager) policyDocument(ctx context.Context, arn, versionID string) (string, error) {
+	out, err := m.iam.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{PolicyArn: aws.String(arn), VersionId: aws.String(versionID)})
 	if err != nil {
 		return "", fmt.Errorf("aws: get policy %s version %s: %w", arn, versionID, err)
 	}
@@ -175,18 +123,8 @@ func (m *Manager) PolicyDocument(ctx context.Context, arn, versionID string) (st
 	return doc, nil
 }
 
-// PolicyDocumentCurrent reports whether the policy's default version is
-// semantically equal to document (whitespace and key order ignored).
-func (m *Manager) PolicyDocumentCurrent(ctx context.Context, policy *IAMPolicy, document string) (bool, error) {
-	current, err := m.PolicyDocument(ctx, policy.ARN, policy.DefaultVersion)
-	if err != nil {
-		return false, err
-	}
-	return EqualPolicyDocuments(current, document)
-}
-
-// EqualPolicyDocuments compares two JSON policy documents semantically.
-func EqualPolicyDocuments(a, b string) (bool, error) {
+// equalPolicyDocuments compares two JSON policy documents semantically.
+func equalPolicyDocuments(a, b string) (bool, error) {
 	var va, vb any
 	if err := json.Unmarshal([]byte(a), &va); err != nil {
 		return false, fmt.Errorf("aws: parse policy document: %w", err)
@@ -210,7 +148,7 @@ func (m *Manager) EnsureManagedPolicy(ctx context.Context, arn, document, descri
 	if !json.Valid([]byte(document)) {
 		return "", errors.New("aws: policy document is not valid JSON")
 	}
-	existing, err := m.ManagedPolicy(ctx, arn)
+	existing, err := m.managedPolicy(ctx, arn)
 	if err != nil {
 		return "", err
 	}
@@ -227,11 +165,15 @@ func (m *Manager) EnsureManagedPolicy(ctx context.Context, arn, document, descri
 		}
 		return PolicyCreated, nil
 	}
-	current, err := m.PolicyDocumentCurrent(ctx, existing, document)
+	current, err := m.policyDocument(ctx, arn, existing.DefaultVersion)
 	if err != nil {
 		return "", err
 	}
-	if current {
+	same, err := equalPolicyDocuments(current, document)
+	if err != nil {
+		return "", err
+	}
+	if same {
 		return PolicyUnchanged, nil
 	}
 	if err := m.pruneOldestPolicyVersion(ctx, arn); err != nil {
@@ -289,54 +231,6 @@ func (m *Manager) deletePolicyVersion(ctx context.Context, arn, versionID string
 	_, err := m.iam.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{PolicyArn: aws.String(arn), VersionId: aws.String(versionID)})
 	if err != nil && !isIAMNotFound(err) {
 		return fmt.Errorf("aws: delete policy %s version %s: %w", arn, versionID, err)
-	}
-	return nil
-}
-
-// ErrPolicyInUse reports a policy still attached to other principals.
-var ErrPolicyInUse = errors.New("policy is still attached or used as a permissions boundary")
-
-// DeleteManagedPolicy deletes a customer-managed policy and all its
-// versions. Attachment counts lag detachments, so it waits up to a minute
-// for them to reach zero and returns ErrPolicyInUse, having changed
-// nothing, if other principals still use the policy. A missing policy is
-// success.
-func (m *Manager) DeleteManagedPolicy(ctx context.Context, arn string) error {
-	if _, err := m.iamClient(); err != nil {
-		return err
-	}
-	deadline := time.Now().Add(iamDetachSettleTimeout)
-	for {
-		policy, err := m.ManagedPolicy(ctx, arn)
-		if err != nil {
-			return err
-		}
-		if policy == nil {
-			return nil
-		}
-		if policy.Attachments == 0 && policy.BoundaryUses == 0 {
-			break
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("aws: delete policy %s: %w (attachments=%d boundary_uses=%d)", arn, ErrPolicyInUse, policy.Attachments, policy.BoundaryUses)
-		}
-		if err := sleepCtx(ctx, iamPollInterval); err != nil {
-			return err
-		}
-	}
-	versions, err := m.policyVersions(ctx, arn)
-	if err != nil {
-		return err
-	}
-	for _, v := range versions {
-		if !v.IsDefaultVersion {
-			if err := m.deletePolicyVersion(ctx, arn, aws.ToString(v.VersionId)); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := m.iam.DeletePolicy(ctx, &iam.DeletePolicyInput{PolicyArn: aws.String(arn)}); err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: delete policy %s: %w", arn, err)
 	}
 	return nil
 }
@@ -407,72 +301,6 @@ func (m *Manager) AttachRolePolicy(ctx context.Context, role, policyARN string) 
 	return nil
 }
 
-// RoleInstanceProfiles lists the instance profiles holding a role.
-func (m *Manager) RoleInstanceProfiles(ctx context.Context, role string) ([]string, error) {
-	client, err := m.iamClient()
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	pager := iam.NewListInstanceProfilesForRolePaginator(client, &iam.ListInstanceProfilesForRoleInput{RoleName: aws.String(role)})
-	for pager.HasMorePages() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("aws: list instance profiles of role %s: %w", role, err)
-		}
-		for _, p := range page.InstanceProfiles {
-			names = append(names, aws.ToString(p.InstanceProfileName))
-		}
-	}
-	return names, nil
-}
-
-// DeleteRole removes the role from its instance profiles, detaches and
-// deletes its policies, and deletes it. A missing role is success.
-func (m *Manager) DeleteRole(ctx context.Context, name string) error {
-	client, err := m.iamClient()
-	if err != nil {
-		return err
-	}
-	if role, err := m.Role(ctx, name); err != nil || role == nil {
-		return err
-	}
-	profiles, err := m.RoleInstanceProfiles(ctx, name)
-	if err != nil {
-		return err
-	}
-	for _, p := range profiles {
-		if err := m.removeRoleFromProfile(ctx, p, name); err != nil {
-			return err
-		}
-	}
-	attached, err := m.RolePolicyARNs(ctx, name)
-	if err != nil {
-		return err
-	}
-	for _, arn := range attached {
-		if _, err := client.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{RoleName: aws.String(name), PolicyArn: aws.String(arn)}); err != nil && !isIAMNotFound(err) {
-			return fmt.Errorf("aws: detach %s from role %s: %w", arn, name, err)
-		}
-	}
-	inline := iam.NewListRolePoliciesPaginator(client, &iam.ListRolePoliciesInput{RoleName: aws.String(name)})
-	for inline.HasMorePages() {
-		page, err := inline.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list inline policies of role %s: %w", name, err)
-		}
-		for _, p := range page.PolicyNames {
-			if _, err := client.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{RoleName: aws.String(name), PolicyName: aws.String(p)}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: delete inline policy %s of role %s: %w", p, name, err)
-			}
-		}
-	}
-	if _, err := client.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: aws.String(name)}); err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: delete role %s: %w", name, err)
-	}
-	return nil
-}
-
 // InstanceProfile returns the instance profile, or nil when it does not exist.
 func (m *Manager) InstanceProfile(ctx context.Context, name string) (*IAMInstanceProfile, error) {
 	client, err := m.iamClient()
@@ -515,32 +343,6 @@ func (m *Manager) AddRoleToInstanceProfile(ctx context.Context, profile, role st
 	}
 	if _, err := client.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{InstanceProfileName: aws.String(profile), RoleName: aws.String(role)}); err != nil {
 		return fmt.Errorf("aws: add role %s to instance profile %s: %w", role, profile, err)
-	}
-	return nil
-}
-
-func (m *Manager) removeRoleFromProfile(ctx context.Context, profile, role string) error {
-	_, err := m.iam.RemoveRoleFromInstanceProfile(ctx, &iam.RemoveRoleFromInstanceProfileInput{InstanceProfileName: aws.String(profile), RoleName: aws.String(role)})
-	if err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: remove role %s from instance profile %s: %w", role, profile, err)
-	}
-	return nil
-}
-
-// DeleteInstanceProfile removes its roles (the roles survive) and deletes
-// it. A missing profile is success.
-func (m *Manager) DeleteInstanceProfile(ctx context.Context, name string) error {
-	profile, err := m.InstanceProfile(ctx, name)
-	if err != nil || profile == nil {
-		return err
-	}
-	for _, role := range profile.Roles {
-		if err := m.removeRoleFromProfile(ctx, name, role); err != nil {
-			return err
-		}
-	}
-	if _, err := m.iam.DeleteInstanceProfile(ctx, &iam.DeleteInstanceProfileInput{InstanceProfileName: aws.String(name)}); err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: delete instance profile %s: %w", name, err)
 	}
 	return nil
 }
@@ -660,131 +462,6 @@ func (m *Manager) CreateAccessKey(ctx context.Context, name string) (AccessKey, 
 		return AccessKey{}, fmt.Errorf("aws: create access key for user %s: %w", name, err)
 	}
 	return AccessKey{ID: aws.ToString(out.AccessKey.AccessKeyId), Secret: aws.ToString(out.AccessKey.SecretAccessKey)}, nil
-}
-
-// DeleteUser deletes the user after removing everything IAM requires gone
-// first: access keys, console password, MFA devices (virtual ones are
-// deleted too), SSH public keys, signing certificates, service-specific
-// credentials, group memberships, and managed and inline policies. A
-// missing user is success.
-func (m *Manager) DeleteUser(ctx context.Context, name string) error {
-	client, err := m.iamClient()
-	if err != nil {
-		return err
-	}
-	if user, err := m.User(ctx, name); err != nil || user == nil {
-		return err
-	}
-	user := aws.String(name)
-	keys, err := m.AccessKeyIDs(ctx, name)
-	if err != nil {
-		return err
-	}
-	for _, id := range keys {
-		if _, err := client.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{UserName: user, AccessKeyId: aws.String(id)}); err != nil && !isIAMNotFound(err) {
-			return fmt.Errorf("aws: delete access key %s of user %s: %w", id, name, err)
-		}
-	}
-	if _, err := client.DeleteLoginProfile(ctx, &iam.DeleteLoginProfileInput{UserName: user}); err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: delete console password of user %s: %w", name, err)
-	}
-	mfa := iam.NewListMFADevicesPaginator(client, &iam.ListMFADevicesInput{UserName: user})
-	for mfa.HasMorePages() {
-		page, err := mfa.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list MFA devices of user %s: %w", name, err)
-		}
-		for _, d := range page.MFADevices {
-			serial := aws.ToString(d.SerialNumber)
-			if _, err := client.DeactivateMFADevice(ctx, &iam.DeactivateMFADeviceInput{UserName: user, SerialNumber: aws.String(serial)}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: deactivate MFA device %s of user %s: %w", serial, name, err)
-			}
-			// Virtual devices are IAM resources (ARN serials); hardware
-			// tokens are not and need no deletion.
-			if strings.HasPrefix(serial, "arn:") {
-				if _, err := client.DeleteVirtualMFADevice(ctx, &iam.DeleteVirtualMFADeviceInput{SerialNumber: aws.String(serial)}); err != nil && !isIAMNotFound(err) {
-					return fmt.Errorf("aws: delete virtual MFA device %s: %w", serial, err)
-				}
-			}
-		}
-	}
-	sshKeys := iam.NewListSSHPublicKeysPaginator(client, &iam.ListSSHPublicKeysInput{UserName: user})
-	for sshKeys.HasMorePages() {
-		page, err := sshKeys.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list SSH public keys of user %s: %w", name, err)
-		}
-		for _, k := range page.SSHPublicKeys {
-			if _, err := client.DeleteSSHPublicKey(ctx, &iam.DeleteSSHPublicKeyInput{UserName: user, SSHPublicKeyId: k.SSHPublicKeyId}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: delete SSH public key %s of user %s: %w", aws.ToString(k.SSHPublicKeyId), name, err)
-			}
-		}
-	}
-	certs := iam.NewListSigningCertificatesPaginator(client, &iam.ListSigningCertificatesInput{UserName: user})
-	for certs.HasMorePages() {
-		page, err := certs.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list signing certificates of user %s: %w", name, err)
-		}
-		for _, c := range page.Certificates {
-			if _, err := client.DeleteSigningCertificate(ctx, &iam.DeleteSigningCertificateInput{UserName: user, CertificateId: c.CertificateId}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: delete signing certificate %s of user %s: %w", aws.ToString(c.CertificateId), name, err)
-			}
-		}
-	}
-	// ListServiceSpecificCredentials has no SDK paginator.
-	for input := (&iam.ListServiceSpecificCredentialsInput{UserName: user}); ; {
-		page, err := client.ListServiceSpecificCredentials(ctx, input)
-		if err != nil {
-			return fmt.Errorf("aws: list service-specific credentials of user %s: %w", name, err)
-		}
-		for _, c := range page.ServiceSpecificCredentials {
-			if _, err := client.DeleteServiceSpecificCredential(ctx, &iam.DeleteServiceSpecificCredentialInput{UserName: user, ServiceSpecificCredentialId: c.ServiceSpecificCredentialId}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: delete service-specific credential %s of user %s: %w", aws.ToString(c.ServiceSpecificCredentialId), name, err)
-			}
-		}
-		if !page.IsTruncated || page.Marker == nil {
-			break
-		}
-		input.Marker = page.Marker
-	}
-	groups := iam.NewListGroupsForUserPaginator(client, &iam.ListGroupsForUserInput{UserName: aws.String(name)})
-	for groups.HasMorePages() {
-		page, err := groups.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list groups of user %s: %w", name, err)
-		}
-		for _, g := range page.Groups {
-			if _, err := client.RemoveUserFromGroup(ctx, &iam.RemoveUserFromGroupInput{UserName: aws.String(name), GroupName: g.GroupName}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: remove user %s from group %s: %w", name, aws.ToString(g.GroupName), err)
-			}
-		}
-	}
-	attached, err := m.UserPolicyARNs(ctx, name)
-	if err != nil {
-		return err
-	}
-	for _, arn := range attached {
-		if _, err := client.DetachUserPolicy(ctx, &iam.DetachUserPolicyInput{UserName: aws.String(name), PolicyArn: aws.String(arn)}); err != nil && !isIAMNotFound(err) {
-			return fmt.Errorf("aws: detach %s from user %s: %w", arn, name, err)
-		}
-	}
-	inline := iam.NewListUserPoliciesPaginator(client, &iam.ListUserPoliciesInput{UserName: aws.String(name)})
-	for inline.HasMorePages() {
-		page, err := inline.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("aws: list inline policies of user %s: %w", name, err)
-		}
-		for _, p := range page.PolicyNames {
-			if _, err := client.DeleteUserPolicy(ctx, &iam.DeleteUserPolicyInput{UserName: aws.String(name), PolicyName: aws.String(p)}); err != nil && !isIAMNotFound(err) {
-				return fmt.Errorf("aws: delete inline policy %s of user %s: %w", p, name, err)
-			}
-		}
-	}
-	if _, err := client.DeleteUser(ctx, &iam.DeleteUserInput{UserName: aws.String(name)}); err != nil && !isIAMNotFound(err) {
-		return fmt.Errorf("aws: delete user %s: %w", name, err)
-	}
-	return nil
 }
 
 func isIAMNotFound(err error) bool {

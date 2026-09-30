@@ -24,8 +24,6 @@ type fakeIAMAccount struct {
 	profiles map[string]*awsprovider.IAMInstanceProfile
 	users    map[string]*fakeIAMUser
 	creates  []string
-	// staleRoleProfiles are listed for every role, like a lagging IAM read.
-	staleRoleProfiles []string
 }
 
 type fakeIAMPolicy struct {
@@ -55,36 +53,6 @@ func newFakeIAMAccount() *fakeIAMAccount {
 	}
 }
 
-func (f *fakeIAMAccount) usage(arn string) (attachments, boundaries int32) {
-	for _, r := range f.roles {
-		if slices.Contains(r.attached, arn) {
-			attachments++
-		}
-	}
-	for _, u := range f.users {
-		if slices.Contains(u.attached, arn) {
-			attachments++
-		}
-		if u.boundary == arn {
-			boundaries++
-		}
-	}
-	return attachments, boundaries
-}
-
-func (f *fakeIAMAccount) ManagedPolicy(_ context.Context, arn string) (*awsprovider.IAMPolicy, error) {
-	p, ok := f.policies[arn]
-	if !ok {
-		return nil, nil
-	}
-	a, b := f.usage(arn)
-	return &awsprovider.IAMPolicy{ARN: arn, DefaultVersion: "v1", Tags: p.tags, Attachments: a, BoundaryUses: b}, nil
-}
-
-func (f *fakeIAMAccount) PolicyDocumentCurrent(_ context.Context, policy *awsprovider.IAMPolicy, document string) (bool, error) {
-	return awsprovider.EqualPolicyDocuments(f.policies[policy.ARN].doc, document)
-}
-
 func (f *fakeIAMAccount) EnsureManagedPolicy(_ context.Context, arn, document, _ string, tags map[string]string) (string, error) {
 	p, ok := f.policies[arn]
 	if !ok {
@@ -97,14 +65,6 @@ func (f *fakeIAMAccount) EnsureManagedPolicy(_ context.Context, arn, document, _
 	}
 	p.doc = document
 	return awsprovider.PolicyUpdated, nil
-}
-
-func (f *fakeIAMAccount) DeleteManagedPolicy(_ context.Context, arn string) error {
-	if a, b := f.usage(arn); a+b > 0 {
-		return fmt.Errorf("delete %s: %w", arn, awsprovider.ErrPolicyInUse)
-	}
-	delete(f.policies, arn)
-	return nil
 }
 
 func (f *fakeIAMAccount) Role(_ context.Context, name string) (*awsprovider.IAMRole, error) {
@@ -135,24 +95,6 @@ func (f *fakeIAMAccount) AttachRolePolicy(_ context.Context, role, arn string) e
 	return nil
 }
 
-func (f *fakeIAMAccount) RoleInstanceProfiles(_ context.Context, role string) ([]string, error) {
-	var names []string
-	for name, p := range f.profiles {
-		if slices.Contains(p.Roles, role) {
-			names = append(names, name)
-		}
-	}
-	return append(names, f.staleRoleProfiles...), nil
-}
-
-func (f *fakeIAMAccount) DeleteRole(_ context.Context, name string) error {
-	for _, p := range f.profiles {
-		p.Roles = slices.DeleteFunc(p.Roles, func(r string) bool { return r == name })
-	}
-	delete(f.roles, name)
-	return nil
-}
-
 func (f *fakeIAMAccount) InstanceProfile(_ context.Context, name string) (*awsprovider.IAMInstanceProfile, error) {
 	p, ok := f.profiles[name]
 	if !ok {
@@ -171,11 +113,6 @@ func (f *fakeIAMAccount) CreateInstanceProfile(_ context.Context, name string, t
 
 func (f *fakeIAMAccount) AddRoleToInstanceProfile(_ context.Context, profile, role string) error {
 	f.profiles[profile].Roles = append(f.profiles[profile].Roles, role)
-	return nil
-}
-
-func (f *fakeIAMAccount) DeleteInstanceProfile(_ context.Context, name string) error {
-	delete(f.profiles, name)
 	return nil
 }
 
@@ -221,11 +158,6 @@ func (f *fakeIAMAccount) CreateAccessKey(_ context.Context, name string) (awspro
 	return awsprovider.AccessKey{ID: id, Secret: "secret-" + id}, nil
 }
 
-func (f *fakeIAMAccount) DeleteUser(_ context.Context, name string) error {
-	delete(f.users, name)
-	return nil
-}
-
 func testAWSIAMTarget(opts awsIAMOptions) awsIAMTarget {
 	if opts.User == "" {
 		opts.User = defaultAWSIAMUser
@@ -264,11 +196,6 @@ func TestAWSIAMCreateUserFreshAccountThenIdempotent(t *testing.T) {
 	assert.ElementsMatch(t, append(slices.Clone(target.RoleAWSPolicyARNs), target.RoleExecPolicyARN), acct.roles[awsIAMRoleName].attached)
 	assert.Equal(t, []string{awsIAMRoleName}, acct.profiles[awsIAMRoleName].Roles)
 	assert.Empty(t, user.keys, "no access key without --access-key")
-
-	status, err := runIAM(t, func(o, _ *bytes.Buffer) error { return awsIAMStatus(ctx, acct, target, o) })
-	require.NoError(t, err)
-	assert.Contains(t, status, "ready=true\n")
-
 	creates := len(acct.creates)
 	out, err = runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
 	require.NoError(t, err)
@@ -278,7 +205,7 @@ func TestAWSIAMCreateUserFreshAccountThenIdempotent(t *testing.T) {
 }
 
 // Editing hack/aws-e2e.iam-policy.json and rerunning create-user is the rollout path.
-func TestAWSIAMCreateUserUpdatesStalePolicyAndStatusReportsIt(t *testing.T) {
+func TestAWSIAMCreateUserUpdatesStalePolicy(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	acct := newFakeIAMAccount()
@@ -287,19 +214,14 @@ func TestAWSIAMCreateUserUpdatesStalePolicyAndStatusReportsIt(t *testing.T) {
 	require.NoError(t, err)
 
 	acct.policies[target.UserPolicyARN].doc = `{"Version":"2012-10-17","Statement":[]}`
-	status, err := runIAM(t, func(o, _ *bytes.Buffer) error { return awsIAMStatus(ctx, acct, target, o) })
-	require.NoError(t, err)
-	assert.Contains(t, status, "current=false")
-	assert.Contains(t, status, "ready=false\n")
-
 	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "user_policy=updated\n")
 	assert.JSONEq(t, hack.AWSE2EUserPolicy, acct.policies[target.UserPolicyARN].doc)
 }
 
-// Resources made by hand (README) are adopted by create-user, never deleted by delete-user.
-func TestAWSIAMAdoptsButNeverDeletesUnmanaged(t *testing.T) {
+// Resources made by hand (README) are adopted: boundary set, policy attached.
+func TestAWSIAMCreateUserAdoptsUnmanaged(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	acct := newFakeIAMAccount()
@@ -308,73 +230,14 @@ func TestAWSIAMAdoptsButNeverDeletesUnmanaged(t *testing.T) {
 	acct.profiles[awsIAMRoleName] = &awsprovider.IAMInstanceProfile{Roles: []string{awsIAMRoleName}}
 	target := testAWSIAMTarget(awsIAMOptions{Role: true})
 
-	_, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
+	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
 	require.NoError(t, err)
+	assert.Contains(t, out, "user_state=existing\n")
+	assert.Contains(t, out, "role_state=existing\n")
 	user := acct.users[defaultAWSIAMUser]
 	assert.Equal(t, target.UserPolicyARN, user.boundary, "adopted user gets the boundary")
 	assert.Equal(t, []string{target.UserPolicyARN}, user.attached)
-
-	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	assert.Contains(t, out, "user=kept\n")
-	assert.Contains(t, out, "role=kept\n")
-	assert.Contains(t, out, "instance_profile=kept\n")
-	// Our policies are still in use by the kept principals.
-	assert.Contains(t, out, "user_policy=kept\n")
-	assert.Contains(t, out, "role_exec_policy=kept\n")
-	assert.Contains(t, acct.users, defaultAWSIAMUser)
-	assert.Contains(t, acct.roles, awsIAMRoleName)
-	assert.Contains(t, acct.policies, target.UserPolicyARN)
-}
-
-func TestAWSIAMDeleteUserDeletesManagedResources(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	acct := newFakeIAMAccount()
-	target := testAWSIAMTarget(awsIAMOptions{Role: true, AccessKey: true})
-	_, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-
-	// Default delete-user keeps the role: running instances still need it.
-	target.IncludeRole = false
-	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	assert.Equal(t, "account_id=111111111111\nuser=deleted\nuser_policy=deleted\n", out)
-	assert.Empty(t, acct.users)
-	assert.Contains(t, acct.roles, awsIAMRoleName)
-
-	target.IncludeRole = true
-	// IAM may still list the profile delete-user deletes; that must not keep the role.
-	acct.staleRoleProfiles = []string{awsIAMRoleName}
-	out, err = runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	assert.Contains(t, out, "instance_profile=deleted\nrole=deleted\nrole_exec_policy=deleted\n")
-	assert.Empty(t, acct.roles)
-	assert.Empty(t, acct.profiles)
-	assert.Empty(t, acct.policies)
-
-	// Idempotent.
-	out, err = runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	assert.Equal(t, "account_id=111111111111\nuser=absent\nuser_policy=absent\ninstance_profile=absent\nrole=absent\nrole_exec_policy=absent\n", out)
-}
-
-// A policy shared with another user outlives the managed user's removal.
-func TestAWSIAMDeleteUserKeepsPolicySharedWithOtherUser(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	acct := newFakeIAMAccount()
-	alice := testAWSIAMTarget(awsIAMOptions{User: "etcd-infra-alice"})
-	bob := testAWSIAMTarget(awsIAMOptions{User: "etcd-infra-bob"})
-	for _, target := range []awsIAMTarget{alice, bob} {
-		_, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
-		require.NoError(t, err)
-	}
-	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, alice, o, l) })
-	require.NoError(t, err)
-	assert.Contains(t, out, "user=deleted\nuser_policy=kept\n")
-	assert.Contains(t, acct.users, "etcd-infra-bob")
-	assert.Equal(t, alice.UserPolicyARN, acct.users["etcd-infra-bob"].boundary)
+	assert.ElementsMatch(t, append(slices.Clone(target.RoleAWSPolicyARNs), target.RoleExecPolicyARN), acct.roles[awsIAMRoleName].attached)
 }
 
 func TestAWSIAMCreateUserAccessKey(t *testing.T) {
@@ -429,23 +292,6 @@ func TestAWSIAMCreateUserRefusals(t *testing.T) {
 	require.NoError(t, validateAWSIAMPartition("aws"))
 }
 
-// Deleting our role must not empty an instance profile we did not create.
-func TestAWSIAMDeleteUserKeepsRoleInForeignProfile(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	acct := newFakeIAMAccount()
-	acct.profiles[awsIAMRoleName] = &awsprovider.IAMInstanceProfile{} // made by hand, empty
-	target := testAWSIAMTarget(awsIAMOptions{Role: true})
-	_, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMCreateUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	require.True(t, awsIAMManaged(acct.roles[awsIAMRoleName].tags), "create-user created the role")
-
-	out, err := runIAM(t, func(o, l *bytes.Buffer) error { return awsIAMDeleteUser(ctx, acct, target, o, l) })
-	require.NoError(t, err)
-	assert.Contains(t, out, "instance_profile=kept\nrole=kept\nrole_exec_policy=kept\n")
-	assert.Equal(t, []string{awsIAMRoleName}, acct.profiles[awsIAMRoleName].Roles)
-}
-
 // The embedded policies are what "create-user" uploads: they must be valid,
 // fit IAM's managed-policy size limit, and name the role it creates.
 func TestAWSIAMEmbeddedPolicies(t *testing.T) {
@@ -466,5 +312,5 @@ func TestAWSIAMDryRunAndValidation(t *testing.T) {
 	require.ErrorContains(t, runAWSIAM(ctx, []string{"create-user", "--user", "bad user"}), "invalid --user")
 	require.ErrorContains(t, runAWSIAM(ctx, []string{"create-user", "extra"}), "unexpected arguments")
 	require.ErrorContains(t, runAWSIAM(ctx, []string{"bogus"}), "unknown aws iam command")
-	require.ErrorContains(t, runAWSIAM(ctx, []string{"delete-user"}), "identify AWS account")
+	require.ErrorContains(t, runAWSIAM(ctx, []string{"create-user", "--dry-run=false"}), "identify AWS account")
 }
