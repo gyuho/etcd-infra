@@ -28,6 +28,9 @@ func (m *Manager) Get(ctx context.Context, id string) (compute.Instance, error) 
 		InstanceIds: []string{id},
 	})
 	if err != nil {
+		if isInstanceNotFoundError(err) {
+			return nil, fmt.Errorf("aws: describe instance %s: %w: %w", id, ErrInstanceNotFound, err)
+		}
 		return nil, fmt.Errorf("aws: describe instance %s: %w", id, err)
 	}
 
@@ -41,7 +44,7 @@ func (m *Manager) Get(ctx context.Context, id string) (compute.Instance, error) 
 			return m.instanceFromEC2(instance), nil
 		}
 	}
-	return nil, fmt.Errorf("aws: instance %s not found", id)
+	return nil, fmt.Errorf("aws: instance %s: %w", id, ErrInstanceNotFound)
 }
 
 // List returns all non-terminated EC2 instances visible to current credentials.

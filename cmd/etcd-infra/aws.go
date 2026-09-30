@@ -63,6 +63,11 @@ type awsState struct {
 	BinaryURL    string   `json:"binaryURL,omitempty"`
 	BinarySHA256 string   `json:"binarySHA256,omitempty"`
 	Replaceable  bool     `json:"replaceable,omitempty"`
+	// Dev is set only for "aws dev" boxes: one empty Ubuntu instance
+	// (Instances[0]) with a mounted data volume and no etcd. Its volume is
+	// DeleteOnTermination, so it is not Replaceable; "aws down" and "aws
+	// status" still work, while cluster-only commands refuse it.
+	Dev *awsDevState `json:"dev,omitempty"`
 }
 
 type awsInstanceState struct {
@@ -78,7 +83,7 @@ type awsInstanceState struct {
 
 func runAWS(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: etcd-infra aws <up|down|status|drive|replace>")
+		return errors.New("usage: etcd-infra aws <up|down|status|drive|replace|dev>")
 	}
 
 	switch args[0] {
@@ -92,6 +97,8 @@ func runAWS(ctx context.Context, args []string) error {
 		return runAWSDrive(ctx, args[1:])
 	case "replace":
 		return runAWSReplace(ctx, args[1:])
+	case "dev":
+		return runAWSDev(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown aws command %q", args[0])
 	}
@@ -640,7 +647,7 @@ install -m 0755 "$tmp/${archive%%.tar.gz}/etcdutl" /usr/local/bin/etcdutl`,
 
 	var volumeSetup string
 	if opts.DataVolumeSetup {
-		volumeSetup = awsDataVolumeSetupScript + "\n"
+		volumeSetup = awsDataVolumeSetupScript("/var/lib/etcd") + "\n"
 	}
 
 	return fmt.Sprintf(`set -euo pipefail
@@ -670,16 +677,27 @@ systemctl enable --now etcd-infra.service
 }
 
 // awsDataVolumeSetupScript mounts the dedicated EBS data volume at
-// /var/lib/etcd. The volume is the non-root NVMe disk. It is formatted on
-// first use only; a replacement instance finds the existing filesystem and
-// the member's data. The fstab entry remounts it across reboots (the
-// hard-crash tests reboot members in-guest).
-const awsDataVolumeSetupScript = `root_disk="$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')"
+// mountPoint. The volume is the EBS NVMe disk (instance-store NVMe disks
+// report another model and are never touched) with no filesystem mounted
+// anywhere other than mountPoint: that excludes the root disk without
+// trusting findmnt's root source (Ubuntu reports "/dev/root"), and keeps the
+// script idempotent once the volume is mounted. It is formatted on first use
+// only; a replacement instance finds the existing filesystem and the
+// member's data. The fstab entry remounts it across reboots (the hard-crash
+// tests reboot members in-guest). mountPoint must be an absolute path of
+// shell-safe characters.
+func awsDataVolumeSetupScript(mountPoint string) string {
+	return fmt.Sprintf(`mount_point=%s
 data_dev=""
 for _ in $(seq 1 60); do
-    for d in /dev/nvme[0-9]n1; do
+    for d in /dev/nvme[0-9]n1 /dev/nvme[0-9][0-9]n1; do
         [ -b "$d" ] || continue
-        [ "$d" = "$root_disk" ] && continue
+        case "$(lsblk -dno MODEL "$d")" in
+            "Amazon Elastic Block Store"*) ;;
+            *) continue ;;
+        esac
+        mounted_elsewhere="$(lsblk -nro MOUNTPOINT "$d" | grep -v -x -e '' -e "$mount_point" || true)"
+        [ -n "$mounted_elsewhere" ] && continue
         data_dev="$d"
         break
     done
@@ -691,9 +709,11 @@ if ! blkid "$data_dev" >/dev/null 2>&1; then
     mkfs.ext4 -q -L etcd-data "$data_dev"
 fi
 uuid="$(blkid -s UUID -o value "$data_dev")"
-install -d -m 0700 /var/lib/etcd
-grep -q "UUID=$uuid" /etc/fstab || echo "UUID=$uuid /var/lib/etcd ext4 defaults,nofail 0 2" >> /etc/fstab
-mountpoint -q /var/lib/etcd || mount /var/lib/etcd`
+[ -n "$uuid" ] || { echo "data volume $data_dev has no filesystem UUID" >&2; exit 1; }
+install -d -m 0700 "$mount_point"
+grep -q "UUID=$uuid" /etc/fstab || echo "UUID=$uuid $mount_point ext4 defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q "$mount_point" || mount "$mount_point"`, shell.Quote(mountPoint))
+}
 
 // awsSystemdEnvironment renders systemd Environment= lines, one per KEY=VALUE
 // entry. Values are double-quoted because failpoint terms contain spaces and

@@ -120,6 +120,18 @@
       "Resource": "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost"
     },
     {
+      "Sid": "SSMStartSessionShellDocument",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell"
+    },
+    {
+      "Sid": "SSMReadUbuntuAMIParameters",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/canonical/ubuntu/server/*"
+    },
+    {
       "Sid": "SSMResumeAndTerminateOwnSessions",
       "Effect": "Allow",
       "Action": [

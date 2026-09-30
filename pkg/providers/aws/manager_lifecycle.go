@@ -143,15 +143,16 @@ func (m *Manager) buildRunInstancesInput(ctx context.Context, op compute.Op) (*e
 			input.PrivateIpAddress = aws.String(cfg.PrivateIPAddress)
 		}
 		if cfg.DataVolumeSizeGB > 0 && cfg.DataVolumeID == "" {
-			// A dedicated data volume that survives termination: replacement
-			// reattaches it instead of losing /var/lib/etcd with the root
-			// volume.
+			// A dedicated data volume. By default it survives termination:
+			// replacement reattaches it instead of losing /var/lib/etcd with
+			// the root volume. Ephemeral hosts opt into deletion with the
+			// instance.
 			input.BlockDeviceMappings = append(input.BlockDeviceMappings, types.BlockDeviceMapping{
 				DeviceName: aws.String(dataVolumeDeviceName),
 				Ebs: &types.EbsBlockDevice{
 					VolumeType:          types.VolumeTypeGp3,
 					VolumeSize:          aws.Int32(int32(cfg.DataVolumeSizeGB)), //nolint:gosec // bounded by flag validation
-					DeleteOnTermination: aws.Bool(false),
+					DeleteOnTermination: aws.Bool(cfg.DataVolumeDeleteOnTermination),
 				},
 			})
 		}
@@ -226,6 +227,12 @@ func (m *Manager) Delete(ctx context.Context, req compute.DeleteRequest) (comput
 	}
 	_, err := m.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
 	if err != nil {
+		// NotFound is not proof of termination: wrong-account credentials and
+		// post-launch eventual consistency return it too. Callers that can
+		// rule those out (see "aws dev down") match ErrInstanceNotFound.
+		if isInstanceNotFoundError(err) {
+			return compute.DeleteResult{}, fmt.Errorf("aws: terminate instance %s: %w: %w", id, ErrInstanceNotFound, err)
+		}
 		return compute.DeleteResult{}, fmt.Errorf("aws: terminate instance %s: %w", id, err)
 	}
 	return compute.DeleteResult{ID: id, Deleted: true}, nil
@@ -462,6 +469,11 @@ func (m *Manager) WaitForTerminated(ctx context.Context, id string, timeout time
 	for {
 		inst, err := m.Get(ctx, id)
 		if err == nil && inst.State() == compute.InstanceStateTerminated {
+			return nil
+		}
+		// Callers wait only after a successful terminate by these
+		// credentials, so NotFound here means purged, not unseen.
+		if errors.Is(err, ErrInstanceNotFound) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -846,6 +858,20 @@ func isVolumeNotFoundError(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "InvalidVolume.NotFound")
+}
+
+// ErrInstanceNotFound reports an instance EC2 no longer knows about;
+// terminated instances are purged from the API after about an hour.
+var ErrInstanceNotFound = errors.New("instance not found")
+
+// isInstanceNotFoundError reports whether the error is EC2's
+// InvalidInstanceID.NotFound.
+func isInstanceNotFoundError(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidInstanceID.NotFound" {
+		return true
+	}
+	return strings.Contains(err.Error(), "InvalidInstanceID.NotFound")
 }
 
 // isIPAddressInUseError reports whether the error is EC2's

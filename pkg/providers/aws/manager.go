@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 )
 
@@ -47,6 +48,7 @@ type Manager struct {
 	ec2 ec2API
 	ssm ssmAPI
 	asg asgAPI
+	sts stsAPI
 }
 
 type ec2API interface {
@@ -67,6 +69,7 @@ type ec2API interface {
 type ssmAPI interface {
 	SendCommand(ctx context.Context, input *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
 	GetCommandInvocation(ctx context.Context, input *ssm.GetCommandInvocationInput, optFns ...func(*ssm.Options)) (*ssm.GetCommandInvocationOutput, error)
+	GetParameters(ctx context.Context, input *ssm.GetParametersInput, optFns ...func(*ssm.Options)) (*ssm.GetParametersOutput, error)
 }
 
 type asgAPI interface {
@@ -82,6 +85,7 @@ func New(cfg aws.Config) *Manager {
 		ec2: ec2.NewFromConfig(cfg),
 		ssm: ssm.NewFromConfig(cfg),
 		asg: autoscaling.NewFromConfig(cfg),
+		sts: sts.NewFromConfig(cfg),
 	}
 }
 
@@ -93,7 +97,7 @@ func newWithEC2(client ec2API) *Manager {
 }
 
 // newWithClients creates a Manager using explicit EC2/SSM clients (test helper).
-func newWithClients(ec2Client ec2API, ssmClient ssmAPI) *Manager { //nolint:unparam // ssmClient is always nil in current tests but kept for SSM test coverage
+func newWithClients(ec2Client ec2API, ssmClient ssmAPI) *Manager {
 	return &Manager{
 		ec2: ec2Client,
 		ssm: ssmClient,
@@ -180,8 +184,9 @@ func (i *instanceInfo) RunCommandWithOptions(ctx context.Context, command []stri
 		return nil, errors.New("aws: command cannot be empty")
 	}
 
-	// Explicitly requested behavior: treat host shutdown as instance termination.
-	if isShutdownCommand(command) {
+	// Explicitly requested behavior: treat host shutdown as instance
+	// termination, unless the caller asked for in-guest shutdown commands.
+	if !guestShutdown(opts) && isShutdownCommand(command) {
 		return i.terminateAsShutdown(ctx)
 	}
 

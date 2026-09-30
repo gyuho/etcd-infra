@@ -179,6 +179,21 @@ type fakeSSM struct {
 	getErr     error
 	invokes    []*ssm.GetCommandInvocationOutput
 	callIndex  int
+
+	paramInput  *ssm.GetParametersInput
+	paramOutput *ssm.GetParametersOutput
+	paramErr    error
+}
+
+func (f *fakeSSM) GetParameters(_ context.Context, input *ssm.GetParametersInput, _ ...func(*ssm.Options)) (*ssm.GetParametersOutput, error) {
+	f.paramInput = input
+	if f.paramErr != nil {
+		return nil, f.paramErr
+	}
+	if f.paramOutput != nil {
+		return f.paramOutput, nil
+	}
+	return &ssm.GetParametersOutput{}, nil
 }
 
 func (f *fakeSSM) SendCommand(_ context.Context, input *ssm.SendCommandInput, _ ...func(*ssm.Options)) (*ssm.SendCommandOutput, error) {
@@ -316,6 +331,57 @@ func TestCreateBuildsRunInstancesRequest(t *testing.T) {
 	assert.Equal(t, defaultSSHUser, ssh.User)
 	assert.Equal(t, 22, ssh.Port)
 	assert.Equal(t, "/tmp/key", ssh.PrivateKeyPath)
+}
+
+func TestCreateDataVolumeTerminationPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, ephemeral := range []bool{false, true} {
+		fake := &fakeEC2{
+			subnets:        []types.Subnet{{SubnetId: aws.String("subnet-a")}},
+			securityGroups: []types.SecurityGroup{{GroupId: aws.String("sg-1")}},
+		}
+		_, err := newWithEC2(fake).Create(context.Background(), compute.NewCreateRequest(
+			compute.WithVPCID("vpc-1"),
+			compute.WithName("node-1"),
+			compute.WithImage("ami-1"),
+			compute.WithSize("t3.micro"),
+			compute.WithProviderConfig(CreateConfig{DataVolumeSizeGB: 8, DataVolumeDeleteOnTermination: ephemeral}),
+		))
+		require.NoError(t, err)
+		require.Len(t, fake.runInput.BlockDeviceMappings, 1)
+		ebs := fake.runInput.BlockDeviceMappings[0].Ebs
+		// Replaceable members keep their volume; ephemeral hosts must not leak it.
+		assert.Equal(t, ephemeral, aws.ToBool(ebs.DeleteOnTermination))
+		assert.Equal(t, int32(8), aws.ToInt32(ebs.VolumeSize))
+	}
+}
+
+func TestInstanceNotFoundSemantics(t *testing.T) {
+	t.Parallel()
+
+	notFound := &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound", Message: "gone"}
+	mgr := newWithEC2(&fakeEC2{terminateErr: notFound, describeInstancesErr: notFound})
+
+	// Wrong-account credentials also get NotFound, so Delete must not claim
+	// success; it surfaces a typed error the caller can verify.
+	_, err := mgr.Delete(context.Background(), compute.NewDeleteRequest("i-gone"))
+	require.ErrorIs(t, err, ErrInstanceNotFound)
+
+	_, err = mgr.Get(context.Background(), "i-gone")
+	require.ErrorIs(t, err, ErrInstanceNotFound)
+	// After a successful terminate, a purged instance counts as terminated
+	// instead of waiting out the timeout.
+	require.NoError(t, mgr.WaitForTerminated(context.Background(), "i-gone", time.Second))
+
+	// An empty describe result is the same condition.
+	_, err = newWithEC2(&fakeEC2{}).Get(context.Background(), "i-gone")
+	require.ErrorIs(t, err, ErrInstanceNotFound)
+
+	// Other terminate failures are not NotFound.
+	_, err = newWithEC2(&fakeEC2{terminateErr: errors.New("UnauthorizedOperation")}).Delete(context.Background(), compute.NewDeleteRequest("i-1"))
+	require.ErrorContains(t, err, "UnauthorizedOperation")
+	require.NotErrorIs(t, err, ErrInstanceNotFound)
 }
 
 func TestCreateValidationAndErrorPaths(t *testing.T) {
@@ -743,6 +809,25 @@ func TestRunCommandShutdownTerminatesInstance(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Equal(t, []string{"i-shutdown", "i-shutdown"}, fake.terminateIDs)
+}
+
+func TestRunCommandGuestShutdownRunsOverSSM(t *testing.T) {
+	t.Parallel()
+
+	// A forwarded script that merely mentions "reboot" (a test file name
+	// here) must run in the guest, never terminate the instance.
+	ec2Fake := &fakeEC2{}
+	ssmFake := &fakeSSM{}
+	inst := &instanceInfo{id: "i-dev", ec2: ec2Fake, ssm: ssmFake}
+
+	res, err := inst.RunCommandWithOptions(context.Background(),
+		[]string{"bash", "-c", "go test ./reboot_test.go && sudo reboot"},
+		&compute.RunCommandOptions{ProviderConfig: CommandConfig{GuestShutdown: true}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.ExitCode)
+	assert.Empty(t, ec2Fake.terminateIDs)
+	require.NotNil(t, ssmFake.sendInput)
+	assert.Contains(t, ssmFake.sendInput.Parameters[ssmParameterCommands][0], "reboot_test.go")
 }
 
 func TestRunCommandWithPendingInvocationError(t *testing.T) {

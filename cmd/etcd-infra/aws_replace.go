@@ -36,6 +36,9 @@ func runAWSReplace(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if state.Dev != nil {
+		return fmt.Errorf("%s is a dev box, not an etcd cluster; recreate it with 'aws dev down' and 'aws dev up'", state.Name)
+	}
 	if !state.Replaceable {
 		return fmt.Errorf("cluster %s was not created with --replaceable; its members have no data volume to preserve", state.Name)
 	}

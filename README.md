@@ -343,3 +343,81 @@ up`, it accepts `--extra-args-file` (default `$ETCD_INFRA_EXTRA_ARGS_FILE`)
 to read flags from a file, one per line, keeping private-branch flags out of
 shell history and scripts; the resolved flags are recorded in the local state
 file (mode 0600) so `aws replace` can reproduce a member exactly.
+
+## AWS dev box (ephemeral Ubuntu instance)
+
+`aws dev` manages one empty Ubuntu instance for manual or agent-driven testing
+of a private branch: no etcd, a mounted EBS data volume, the AWS CLI with a
+verified S3 results prefix, and SSM command access. It reuses the AWS
+prerequisites above (existing VPC, the `etcd-infra-ssm` instance profile) and
+the same state store (`~/.etcd-infra/aws/<name>.json`).
+
+```bash
+# Preview (default), then create. The AMI defaults to the latest Canonical
+# Ubuntu Server 24.04 for --arch, resolved from Canonical's public SSM
+# parameter; override with --ubuntu-release (22.04, 24.04, 26.04) or --ami.
+./bin/etcd-infra aws dev up --name dev01 --vpc vpc-123 \
+  --instance-profile etcd-infra-ssm --bucket etcd-infra-e2e-<account>-<region>-v0-<YYYYMM>
+./bin/etcd-infra aws dev up ... --dry-run=false
+
+./bin/etcd-infra aws dev run --name dev01 -- uname -a     # one command
+./bin/etcd-infra aws dev run --name dev01 --script ./t.sh # a local bash script
+./bin/etcd-infra aws dev status --name dev01
+./bin/etcd-infra aws dev down --name dev01
+aws ssm start-session --target <instance_id>              # interactive shell
+```
+
+What `up` guarantees once it returns successfully:
+
+- The data volume (`--volume-size-gb`, default 32, gp3) is formatted and
+  mounted at `--mount-point` (default `/mnt/data`; allowed: `/data`,
+  `/var/lib/etcd`, or under `/mnt/`, `/data/`, `/srv/`, so it can never hide
+  OS state) with an fstab entry, so it survives in-guest reboots. Only the
+  EBS NVMe disk is selected; instance-store disks are never formatted.
+- The AWS CLI is installed and the instance role has written
+  `<results_uri>.dev-ready`, proving the results prefix
+  `s3://<bucket>/etcd-infra/dev/<name>/` is writable. The prefix sits under
+  `etcd-infra/`, which the stock `etcd-infra-ssm-exec` role policy covers for
+  `etcd-infra-e2e-*` buckets.
+- stdout of `up` and `status` is only stable `key=value` lines (`account_id`,
+  `instance_id`, `private_ipv4`, `data_volume_id`, `mount_point`,
+  `results_uri`, `state_file`, ...; `status` adds `instance_state`); progress
+  and suggested next commands go to stderr.
+
+`aws dev run` executes as root over SSM RunCommand, from the mount point, with
+`/etc/profile.d/etcd-infra-dev.sh` sourced (login shells from
+`start-session` source it too): `ETCD_INFRA_DEV_NAME`, `ETCD_INFRA_DEV_DIR`
+(the mount point), `ETCD_INFRA_DEV_RESULTS` (the S3 prefix), and
+`AWS_REGION`. It prints stdout and stderr after the command finishes; a
+non-zero remote exit makes it exit 1 with an error naming the remote code.
+`--timeout` (default 1h) bounds the run. SSM caps captured output at 24,000
+characters per stream, so write large output under `$ETCD_INFRA_DEV_DIR` and
+upload it: `aws s3 cp --recursive out/ "$ETCD_INFRA_DEV_RESULTS"out/`.
+Commands that mention or run `reboot`/`shutdown` run in the guest; they
+never terminate the box. A reboot keeps everything (the volume remounts); a
+poweroff/halt only *stops* the box (EC2's default), which keeps billing for
+both volumes until `dev down`. To ship a locally built binary, `aws s3 cp` it
+under the results prefix from the host, then `aws s3 cp` it down in a
+`dev run`.
+
+Cleanup: the data volume is created with `DeleteOnTermination=true`, so EC2
+deletes it with the instance whenever the instance is terminated (`dev
+down`, `aws down`, or the console). `dev down` terminates the recorded
+instance (running or stopped), waits until EC2 reports it terminated, and
+removes the state file; it is idempotent, refuses to touch etcd-cluster
+state, and keeps the S3 results. An instance already purged from the EC2 API
+counts as gone only if NotFound persists for a minute (a fresh launch can
+briefly report NotFound) and the caller's account matches the `account_id`
+recorded at `up`: credentials for another account see the same NotFound for
+a live box, so `dev down` then fails and keeps the state instead of
+orphaning it. `up` saves state right after the launch (failures before it
+create nothing), so a failed `up` is always cleanable; its error names the
+`dev down` command to run. Tags: `etcd-infra.cluster=<name>`,
+`etcd-infra.role=dev`.
+
+Requirements beyond the cluster setup: the subnet needs outbound internet
+(or NAT) for the snap installs; `SSMReadUbuntuAMIParameters` in
+`hack/aws-e2e.iam-policy.json` grants the AMI lookup (not needed with
+`--ami`), and `SSMStartSessionShellDocument` grants interactive shells (which
+also need the Session Manager plugin on the host). Boxes install the SSM agent
+at first boot when the AMI lacks it.
