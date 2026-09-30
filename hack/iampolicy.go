@@ -1,5 +1,5 @@
 // Package hack embeds the reviewed IAM policy documents in this directory so
-// "etcd-infra aws iam up" applies exactly these files: editing a JSON file
+// "etcd-infra aws iam create-user" applies exactly these files: editing a JSON file
 // here and rerunning the command is how a policy change is rolled out.
 package hack
 

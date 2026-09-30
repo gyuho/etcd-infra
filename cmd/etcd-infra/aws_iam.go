@@ -4,12 +4,12 @@ package main
 // every other etcd-infra AWS command should run as, so day-to-day work
 // never needs administrator credentials:
 //
-//	etcd-infra aws iam up --dry-run=false --access-key   # run once as an admin
+//	etcd-infra aws iam create-user --dry-run=false --access-key   # run once as an admin
 //	etcd-infra aws iam status
-//	etcd-infra aws iam down [--role]
+//	etcd-infra aws iam delete-user [--role]
 //
-// "up" is idempotent and converges the account to the reviewed policy
-// files embedded from hack/ (rerun it after editing them):
+// "create-user" is idempotent and converges the account to the reviewed
+// policy files embedded from hack/ (rerun it after editing them):
 //
 //   - customer-managed policy etcd-infra-aws-e2e (hack/aws-e2e.iam-policy.json);
 //   - IAM user etcd-infra-aws-e2e (--user) with that policy attached AND set
@@ -22,12 +22,12 @@ package main
 //     user policy only allows iam:PassRole on role/etcd-infra-ssm;
 //   - with --access-key: a new access key, printed once.
 //
-// Ownership: everything "up" creates is tagged
-// etcd-infra.managed-by=etcd-infra-aws-iam, and "down" deletes only tagged
-// resources. Resources that already existed without the tag (for example
-// created by hand from the README) are adopted by "up" (policies attached,
-// documents updated) but never deleted. A shared policy still attached to
-// other principals is kept.
+// Ownership: everything "create-user" creates is tagged
+// etcd-infra.managed-by=etcd-infra-aws-iam, and "delete-user" deletes only
+// tagged resources. Resources that already existed without the tag (for
+// example created by hand from the README) are adopted by "create-user"
+// (policies attached, documents updated) but never deleted. A shared policy
+// still attached to other principals is kept.
 
 import (
 	"context"
@@ -124,7 +124,7 @@ type awsIAMTarget struct {
 	IncludeRole        bool
 	CreateAccessKey    bool
 	CallerARN          string
-	// ManagedTags mark resources created by "aws iam up".
+	// ManagedTags mark resources created by "etcd-infra aws iam create-user".
 	ManagedTags map[string]string
 }
 
@@ -157,17 +157,17 @@ func awsIAMManaged(tags map[string]string) bool {
 }
 
 func runAWSIAM(ctx context.Context, args []string) error {
-	const usage = "usage: etcd-infra aws iam <up|status|down>"
+	const usage = "usage: etcd-infra aws iam <create-user|status|delete-user>"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	switch args[0] {
-	case "up":
-		return runAWSIAMUp(ctx, args[1:])
+	case "create-user":
+		return runAWSIAMCreateUser(ctx, args[1:])
 	case "status":
 		return runAWSIAMStatus(ctx, args[1:])
-	case "down":
-		return runAWSIAMDown(ctx, args[1:])
+	case "delete-user":
+		return runAWSIAMDeleteUser(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown aws iam command %q; %s", args[0], usage)
 	}
@@ -216,9 +216,9 @@ func validateAWSIAMPartition(partition string) error {
 	return nil
 }
 
-func runAWSIAMUp(ctx context.Context, args []string) error {
+func runAWSIAMCreateUser(ctx context.Context, args []string) error {
 	opts := awsIAMOptions{}
-	flags := awsIAMFlags("aws iam up", &opts)
+	flags := awsIAMFlags("aws iam create-user", &opts)
 	flags.BoolVar(&opts.Role, "role", true, "also set up role and instance profile "+awsIAMRoleName+" that test instances run as")
 	flags.BoolVar(&opts.AccessKey, "access-key", false, "create an access key for the user and print it once (IAM allows two per user)")
 	flags.BoolVar(&opts.DryRun, "dry-run", true, "show the plan without calling AWS")
@@ -239,7 +239,7 @@ func runAWSIAMUp(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return awsIAMUp(ctx, manager, newAWSIAMTarget(id, opts), os.Stdout, os.Stderr)
+	return awsIAMCreateUser(ctx, manager, newAWSIAMTarget(id, opts), os.Stdout, os.Stderr)
 }
 
 func runAWSIAMStatus(ctx context.Context, args []string) error {
@@ -262,9 +262,9 @@ func runAWSIAMStatus(ctx context.Context, args []string) error {
 	return awsIAMStatus(ctx, manager, newAWSIAMTarget(id, opts), os.Stdout)
 }
 
-func runAWSIAMDown(ctx context.Context, args []string) error {
+func runAWSIAMDeleteUser(ctx context.Context, args []string) error {
 	opts := awsIAMOptions{}
-	flags := awsIAMFlags("aws iam down", &opts)
+	flags := awsIAMFlags("aws iam delete-user", &opts)
 	flags.BoolVar(&opts.Role, "role", false, "also delete role, instance profile, and policy of "+awsIAMRoleName+" (running etcd-infra instances lose SSM access)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -279,26 +279,26 @@ func runAWSIAMDown(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return awsIAMDown(ctx, manager, newAWSIAMTarget(id, opts), os.Stdout, os.Stderr)
+	return awsIAMDeleteUser(ctx, manager, newAWSIAMTarget(id, opts), os.Stdout, os.Stderr)
 }
 
-// awsIAMUp converges the account; every step is idempotent, so a rerun
+// awsIAMCreateUser converges the account; every step is idempotent, so a rerun
 // finishes an interrupted one.
-func awsIAMUp(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
+func awsIAMCreateUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
 	// Bounding the caller's own identity would lock it out of IAM. Compare
 	// full ARNs: user ARNs may carry a path (user/ops/name).
 	if user, err := c.User(ctx, t.User); err != nil {
 		return err
 	} else if user != nil && user.ARN == t.CallerARN {
-		return fmt.Errorf("the current credentials are user %s itself; run 'aws iam up' with administrator credentials as another identity", t.User)
+		return fmt.Errorf("the current credentials are user %s itself; run 'etcd-infra aws iam create-user' with administrator credentials as another identity", t.User)
 	}
 	fmt.Fprintf(out, "account_id=%s\n", t.Account)
 	if t.IncludeRole {
-		if err := awsIAMUpRole(ctx, c, t, out, log); err != nil {
+		if err := awsIAMEnsureRole(ctx, c, t, out, log); err != nil {
 			return err
 		}
 	}
-	if err := awsIAMUpUser(ctx, c, t, out, log); err != nil {
+	if err := awsIAMEnsureUser(ctx, c, t, out, log); err != nil {
 		return err
 	}
 	if t.CreateAccessKey {
@@ -325,7 +325,7 @@ func awsIAMUp(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.W
 	return nil
 }
 
-func awsIAMUpRole(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
+func awsIAMEnsureRole(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
 	state, err := c.EnsureManagedPolicy(ctx, t.RoleExecPolicyARN, t.RoleExecPolicyDoc,
 		"etcd-infra: tag-scoped execution permissions of the "+awsIAMRoleName+" instance role", t.ManagedTags)
 	if err != nil {
@@ -344,7 +344,7 @@ func awsIAMUpRole(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log 
 		}
 		roleState = "created"
 	} else if !awsIAMManaged(role.Tags) {
-		fmt.Fprintf(log, "note: role %s predates 'aws iam' (no %s tag); adopting it, 'aws iam down' will not delete it\n", awsIAMRoleName, awsIAMManagedByTag)
+		fmt.Fprintf(log, "note: role %s predates 'etcd-infra aws iam' (no %s tag); adopting it, 'etcd-infra aws iam delete-user' will not delete it\n", awsIAMRoleName, awsIAMManagedByTag)
 	}
 	attached, err := c.RolePolicyARNs(ctx, awsIAMRoleName)
 	if err != nil {
@@ -385,7 +385,7 @@ func awsIAMUpRole(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log 
 	return nil
 }
 
-func awsIAMUpUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
+func awsIAMEnsureUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
 	state, err := c.EnsureManagedPolicy(ctx, t.UserPolicyARN, t.UserPolicyDocument,
 		"etcd-infra: least-privilege permissions (and boundary) of the etcd-infra IAM user", t.ManagedTags)
 	if err != nil {
@@ -409,7 +409,7 @@ func awsIAMUpUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log 
 		// could widen the user's permissions.
 		managed := awsIAMManaged(user.Tags)
 		if !managed {
-			fmt.Fprintf(log, "note: user %s predates 'aws iam' (no %s tag); adopting it, 'aws iam down' will not delete it\n", t.User, awsIAMManagedByTag)
+			fmt.Fprintf(log, "note: user %s predates 'etcd-infra aws iam' (no %s tag); adopting it, 'etcd-infra aws iam delete-user' will not delete it\n", t.User, awsIAMManagedByTag)
 		}
 		switch user.PermissionsBoundary {
 		case t.UserPolicyARN:
@@ -443,7 +443,7 @@ func awsIAMUpUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log 
 }
 
 // awsIAMStatus reports each resource; "ready=true" means the user and
-// role match what "up" would create.
+// role match what "create-user" would create.
 func awsIAMStatus(ctx context.Context, c awsIAMClient, t awsIAMTarget, out io.Writer) error {
 	ready := true
 	fmt.Fprintf(out, "account_id=%s\n", t.Account)
@@ -534,10 +534,10 @@ func awsIAMStatus(ctx context.Context, c awsIAMClient, t awsIAMTarget, out io.Wr
 	return nil
 }
 
-// awsIAMDown deletes the user (and with IncludeRole the role side), but
+// awsIAMDeleteUser deletes the user (and with IncludeRole the role side), but
 // only resources carrying the managed-by tag. Policies still attached to
 // other principals are kept.
-func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
+func awsIAMDeleteUser(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io.Writer) error {
 	fmt.Fprintf(out, "account_id=%s\n", t.Account)
 	user, err := c.User(ctx, t.User)
 	if err != nil {
@@ -547,7 +547,7 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 	case user == nil:
 		fmt.Fprintf(out, "user=absent\n")
 	case !awsIAMManaged(user.Tags):
-		fmt.Fprintf(log, "user %s has no %s tag (not created by 'aws iam up'); leaving it\n", t.User, awsIAMManagedByTag)
+		fmt.Fprintf(log, "user %s has no %s tag (not created by 'etcd-infra aws iam create-user'); leaving it\n", t.User, awsIAMManagedByTag)
 		fmt.Fprintf(out, "user=kept\n")
 	default:
 		fmt.Fprintf(log, "deleting user %s and its access keys\n", t.User)
@@ -556,7 +556,7 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 		}
 		fmt.Fprintf(out, "user=deleted\n")
 	}
-	if err := awsIAMDownPolicy(ctx, c, "user_policy", t.UserPolicyARN, out, log); err != nil {
+	if err := awsIAMDeletePolicy(ctx, c, "user_policy", t.UserPolicyARN, out, log); err != nil {
 		return err
 	}
 	if !t.IncludeRole {
@@ -604,7 +604,7 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 			profiles = slices.DeleteFunc(profiles, func(p string) bool { return p == awsIAMRoleName })
 		}
 		if len(profiles) > 0 {
-			fmt.Fprintf(log, "role %s is still in instance profile(s) %s not created by 'aws iam up'; leaving it\n", awsIAMRoleName, strings.Join(profiles, ", "))
+			fmt.Fprintf(log, "role %s is still in instance profile(s) %s not created by 'etcd-infra aws iam create-user'; leaving it\n", awsIAMRoleName, strings.Join(profiles, ", "))
 			fmt.Fprintf(out, "role=kept\n")
 			break
 		}
@@ -613,10 +613,10 @@ func awsIAMDown(ctx context.Context, c awsIAMClient, t awsIAMTarget, out, log io
 		}
 		fmt.Fprintf(out, "role=deleted\n")
 	}
-	return awsIAMDownPolicy(ctx, c, "role_exec_policy", t.RoleExecPolicyARN, out, log)
+	return awsIAMDeletePolicy(ctx, c, "role_exec_policy", t.RoleExecPolicyARN, out, log)
 }
 
-func awsIAMDownPolicy(ctx context.Context, c awsIAMClient, key, arn string, out, log io.Writer) error {
+func awsIAMDeletePolicy(ctx context.Context, c awsIAMClient, key, arn string, out, log io.Writer) error {
 	policy, err := c.ManagedPolicy(ctx, arn)
 	if err != nil {
 		return err
@@ -654,6 +654,6 @@ func printAWSIAMPlan(out io.Writer, opts awsIAMOptions) {
 	if opts.AccessKey {
 		fmt.Fprintf(out, "  access key for %s: create and print once\n", opts.User)
 	}
-	fmt.Fprintf(out, "  created resources are tagged %s=%s; 'aws iam down' deletes only those\n", awsIAMManagedByTag, awsIAMManagedByValue)
+	fmt.Fprintf(out, "  created resources are tagged %s=%s; 'etcd-infra aws iam delete-user' deletes only those\n", awsIAMManagedByTag, awsIAMManagedByValue)
 	fmt.Fprintln(out, "rerun with --dry-run=false to apply")
 }
