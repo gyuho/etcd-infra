@@ -63,10 +63,10 @@ type awsState struct {
 	BinaryURL    string   `json:"binaryURL,omitempty"`
 	BinarySHA256 string   `json:"binarySHA256,omitempty"`
 	Replaceable  bool     `json:"replaceable,omitempty"`
-	// Dev is set only for "aws dev" boxes: one empty Ubuntu instance
-	// (Instances[0]) with a mounted data volume and no etcd. Its volume is
-	// DeleteOnTermination, so it is not Replaceable; "aws down" and "aws
-	// status" still work, while cluster-only commands refuse it.
+	// Dev is set only for "aws dev" groups: a launch template plus an Auto
+	// Scaling group of empty Ubuntu boxes (no etcd). Instances stays empty:
+	// membership is read live from the group. "aws down" and "aws status"
+	// delegate to the dev commands, while cluster-only commands refuse it.
 	Dev *awsDevState `json:"dev,omitempty"`
 }
 
@@ -395,6 +395,11 @@ func runAWSDown(ctx context.Context, args []string) error {
 		}
 		return err
 	}
+	if state.Dev != nil {
+		// Dev groups are Auto Scaling groups: terminating their instances
+		// one by one would only make the group relaunch them.
+		return runAWSDevDown(ctx, []string{"--name", *name})
+	}
 	cfg, err := awsprovider.LoadDefaultConfig(ctx, state.Region)
 	if err != nil {
 		return fmt.Errorf("load AWS configuration: %w", err)
@@ -467,6 +472,9 @@ func runAWSStatus(ctx context.Context, args []string) error {
 	state, err := readAWSState(statePath)
 	if err != nil {
 		return err
+	}
+	if state.Dev != nil {
+		return runAWSDevStatus(ctx, []string{"--name", *name})
 	}
 	cfg, err := awsprovider.LoadDefaultConfig(ctx, state.Region)
 	if err != nil {
@@ -792,8 +800,8 @@ func readAWSState(path string) (awsState, error) {
 	// A state with no members is valid when a stress client remains: a
 	// failed "aws down" can delete every member yet fail on a stress client,
 	// and the next "aws down" must still be able to read the state to finish
-	// the job.
-	if state.Name == "" || state.Region == "" || (len(state.Instances) == 0 && len(state.StressClients) == 0) {
+	// the job. Dev groups record no instances at all (membership is live).
+	if state.Name == "" || state.Region == "" || (len(state.Instances) == 0 && len(state.StressClients) == 0 && state.Dev == nil) {
 		return awsState{}, fmt.Errorf("invalid AWS state %s", path)
 	}
 	return state, nil

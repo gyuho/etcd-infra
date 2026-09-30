@@ -344,80 +344,120 @@ to read flags from a file, one per line, keeping private-branch flags out of
 shell history and scripts; the resolved flags are recorded in the local state
 file (mode 0600) so `aws replace` can reproduce a member exactly.
 
-## AWS dev box (ephemeral Ubuntu instance)
+## AWS dev group (ephemeral identical Ubuntu instances)
 
-`aws dev` manages one empty Ubuntu instance for manual or agent-driven testing
-of a private branch: no etcd, a mounted EBS data volume, the AWS CLI with a
-verified S3 results prefix, and SSM command access. It reuses the AWS
-prerequisites above (existing VPC, the `etcd-infra-ssm` instance profile) and
-the same state store (`~/.etcd-infra/aws/<name>.json`).
+`aws dev` manages a group of empty, identical Ubuntu instances for manual or
+agent-driven testing of a private branch: no etcd, a mounted EBS data volume
+per box, the AWS CLI with a verified S3 results prefix, and SSM command
+access. A group is one EC2 **launch template** (the pinned spec) and one
+**Auto Scaling group** launching `--count` copies of it, per AWS's current
+recommendation (launch templates, not launch configurations). It reuses the
+`etcd-infra-ssm` instance profile and the state store
+(`~/.etcd-infra/aws/<name>.json`).
 
 ```bash
 # Preview (default), then create. The AMI defaults to the latest Canonical
 # Ubuntu Server 24.04 for --arch, resolved from Canonical's public SSM
-# parameter; override with --ubuntu-release (22.04, 24.04, 26.04) or --ami.
-./bin/etcd-infra aws dev up --name dev01 --vpc vpc-123 \
+# parameter and pinned into the template; override with --ubuntu-release
+# (22.04, 24.04, 26.04) or --ami.
+./bin/etcd-infra aws dev up --name dev01 --count 3 \
   --instance-profile etcd-infra-ssm --bucket etcd-infra-e2e-<account>-<region>-v0-<YYYYMM>
 ./bin/etcd-infra aws dev up ... --dry-run=false
 
-./bin/etcd-infra aws dev run --name dev01 -- uname -a     # one command
-./bin/etcd-infra aws dev run --name dev01 --script ./t.sh # a local bash script
+./bin/etcd-infra aws dev run --name dev01 -- uname -a            # every box, in parallel
+./bin/etcd-infra aws dev run --name dev01 --instance i-0abc --script ./t.sh
+./bin/etcd-infra aws dev scale --name dev01 --count 5            # same spec, more boxes
 ./bin/etcd-infra aws dev status --name dev01
 ./bin/etcd-infra aws dev down --name dev01
-aws ssm start-session --target <instance_id>              # interactive shell
+aws ssm start-session --target <instance-id>                     # interactive shell
 ```
 
-What `up` guarantees once it returns successfully:
+Networking: groups only launch into an **existing** VPC and never create,
+modify, or delete network resources, so any number of groups (different
+`--name`s) can share one VPC. `--vpc` defaults to `$ETCD_INFRA_AWS_VPC`, then
+the region's default VPC; `--subnets` defaults to every subnet in the VPC
+(the group spreads boxes across their availability zones); security groups
+default to the VPC's `default` group (no inbound rules are needed). Every
+subnet needs outbound internet or NAT for the first-boot installs.
 
-- The data volume (`--volume-size-gb`, default 32, gp3) is formatted and
-  mounted at `--mount-point` (default `/mnt/data`; allowed: `/data`,
-  `/var/lib/etcd`, or under `/mnt/`, `/data/`, `/srv/`, so it can never hide
-  OS state) with an fstab entry, so it survives in-guest reboots. Only the
-  EBS NVMe disk is selected; instance-store disks are never formatted.
-- The AWS CLI is installed and the instance role has written
-  `<results_uri>.dev-ready`, proving the results prefix
-  `s3://<bucket>/etcd-infra/dev/<name>/` is writable. The prefix sits under
-  `etcd-infra/`, which the stock `etcd-infra-ssm-exec` role policy covers for
-  `etcd-infra-e2e-*` buckets.
-- stdout of `up` and `status` is only stable `key=value` lines (`account_id`,
-  `instance_id`, `private_ipv4`, `data_volume_id`, `mount_point`,
-  `results_uri`, `state_file`, ...; `status` adds `instance_state`); progress
-  and suggested next commands go to stderr.
+The spec, identical for every box including later scale-outs (the group
+uses template version 1 explicitly, never `$Latest`):
 
-`aws dev run` executes as root over SSM RunCommand, from the mount point, with
+- `--instance-type` (default t3a.medium, or t4g.medium with `--arch arm64`),
+  the pinned AMI, IMDSv2 required (hop limit 2 so containers can use it).
+- An encrypted gp3 data volume (`--volume-size-gb`, default 32) that EC2
+  deletes with its instance, formatted and mounted at `--mount-point`
+  (default `/mnt/data`; allowed: `/data`, `/var/lib/etcd`, or under `/mnt/`,
+  `/data/`, `/srv/`, so it can never hide OS state) with an fstab entry, so it
+  survives in-guest reboots. Only the EBS NVMe disk is selected;
+  instance-store disks are never formatted.
+- First-boot setup in the template's user data (log:
+  `/var/log/etcd-infra-dev-setup.log`): the SSM agent if the AMI lacks it,
+  the mount, the AWS CLI, and a probe write of `<results>.dev-ready` proving
+  the box's results prefix `s3://<bucket>/etcd-infra/dev/<name>/<instance-id>/`
+  is writable (covered by the stock `etcd-infra-ssm-exec` role policy for
+  `etcd-infra-e2e-*` buckets).
+
+`up` and `scale` return once the group has exactly `--count` in-service
+boxes and each one finished setup (on failure they show the setup log's
+tail). `--count` is 1-20 for `up` and 0-20 for `scale`; on scale-in, Auto
+Scaling picks which boxes to terminate. The group has `AZRebalance` and
+`ReplaceUnhealthy` suspended, so it never terminates or replaces a box on its
+own. stdout of `up`, `scale`, and `status` is only stable `key=value` lines
+(`account_id`, `vpc_id`, `auto_scaling_group`, `launch_template_id`, `count`,
+`results_uri`, `state_file`, ..., plus one `instance=<id> lifecycle=...
+health=... az=... private_ipv4=... results_uri=...` line per box); progress
+and suggested next commands go to stderr.
+
+`aws dev run` executes as root over SSM RunCommand on every in-service box
+(or the `--instance` list) in parallel, from the mount point, with
 `/etc/profile.d/etcd-infra-dev.sh` sourced (login shells from
-`start-session` source it too): `ETCD_INFRA_DEV_NAME`, `ETCD_INFRA_DEV_DIR`
-(the mount point), `ETCD_INFRA_DEV_RESULTS` (the S3 prefix), and
-`AWS_REGION`. It prints stdout and stderr after the command finishes; a
-non-zero remote exit makes it exit 1 with an error naming the remote code.
-`--timeout` (default 1h) bounds the run. SSM caps captured output at 24,000
-characters per stream, so write large output under `$ETCD_INFRA_DEV_DIR` and
-upload it: `aws s3 cp --recursive out/ "$ETCD_INFRA_DEV_RESULTS"out/`.
-Commands that mention or run `reboot`/`shutdown` run in the guest; they
-never terminate the box. A reboot keeps everything (the volume remounts); a
-poweroff/halt only *stops* the box (EC2's default), which keeps billing for
-both volumes until `dev down`. To ship a locally built binary, `aws s3 cp` it
-under the results prefix from the host, then `aws s3 cp` it down in a
-`dev run`.
+`start-session` source it too): `ETCD_INFRA_DEV_NAME`,
+`ETCD_INFRA_DEV_INSTANCE_ID`, `ETCD_INFRA_DEV_DIR` (the mount point),
+`ETCD_INFRA_DEV_RESULTS` (the box's S3 prefix), and `AWS_REGION`. It prints
+output after the command finishes, preceded by `=== <instance-id> exit=<code>
+===` when several boxes ran; any non-zero remote exit makes it exit 1 naming
+the failed boxes. `--timeout` (default 1h) bounds the run. SSM caps captured
+output at 24,000 characters per stream, so write large output under
+`$ETCD_INFRA_DEV_DIR` and upload it: `aws s3 cp --recursive out/
+"$ETCD_INFRA_DEV_RESULTS"out/`. Commands that mention or run
+`reboot`/`shutdown` run in the guest; they never terminate a box. A reboot
+keeps everything (the volume remounts); a poweroff/halt only *stops* the box,
+which keeps billing for its volumes until `dev down`. To ship a locally built
+binary, `aws s3 cp` it under the group's results prefix from the host, then
+`aws s3 cp` it down in a `dev run`.
 
-Cleanup: the data volume is created with `DeleteOnTermination=true`, so EC2
-deletes it with the instance whenever the instance is terminated (`dev
-down`, `aws down`, or the console). `dev down` terminates the recorded
-instance (running or stopped), waits until EC2 reports it terminated, and
-removes the state file; it is idempotent, refuses to touch etcd-cluster
-state, and keeps the S3 results. An instance already purged from the EC2 API
-counts as gone only if NotFound persists for a minute (a fresh launch can
-briefly report NotFound) and the caller's account matches the `account_id`
-recorded at `up`: credentials for another account see the same NotFound for
-a live box, so `dev down` then fails and keeps the state instead of
-orphaning it. `up` saves state right after the launch (failures before it
-create nothing), so a failed `up` is always cleanable; its error names the
-`dev down` command to run. Tags: `etcd-infra.cluster=<name>`,
-`etcd-infra.role=dev`.
+Cleanup: the template and group are named after `--name` and, together with
+a random owner token, recorded in the state file before either is created,
+so a failed or interrupted `up` is always cleanable (its error names the `dev
+down` command). Everything the group creates is tagged
+`etcd-infra.cluster=<name>`, `etcd-infra.role=dev`, and
+`etcd-infra.dev-owner=<token>`. `dev down` (also reached via `aws down --name
+<name>`):
 
-Requirements beyond the cluster setup: the subnet needs outbound internet
-(or NAT) for the snap installs; `SSMReadUbuntuAMIParameters` in
-`hack/aws-e2e.iam-policy.json` grants the AMI lookup (not needed with
-`--ami`), and `SSMStartSessionShellDocument` grants interactive shells (which
-also need the Session Manager plugin on the host). Boxes install the SSM agent
-at first boot when the AMI lacks it.
+1. refuses to run unless the credentials are for the account recorded at
+   `up` (another account would see "not found" for live resources);
+2. force-deletes the Auto Scaling group, which terminates its boxes, and
+   waits until the group is gone;
+3. terminates any instance still carrying the group's three tags and waits
+   until every one is terminated, which is when EC2 deletes their data
+   volumes;
+4. deletes the launch template (by ID), then removes the state file.
+
+Steps 2 and 4 act only on resources carrying this state's owner token: a
+name alone is not proof of ownership, so another user's same-named group is
+never touched. Any failure keeps the state file, so rerunning `dev down`
+finishes the job. It is idempotent, refuses etcd-cluster state, and keeps the
+S3 results. `up` refuses a `--name` (3+ characters) whose template or group
+already exists without its owner token, and leaves that group untouched.
+State left by the earlier single-instance `aws dev` is still torn down by
+`dev down` (terminate and wait); other commands ask you to recreate it.
+
+IAM (`hack/aws-e2e.iam-policy.json`; re-apply after upgrading): launch
+templates and Auto Scaling groups may only be created with, and managed
+when carrying, the `etcd-infra.cluster` tag; groups must pin a template
+version (`autoscaling:LaunchTemplateVersionSpecified`);
+`AutoScalingServiceLinkedRole` lets the first group in an account create
+`AWSServiceRoleForAutoScaling`. `SSMReadUbuntuAMIParameters` grants the AMI
+lookup (not needed with `--ami`), and `SSMStartSessionShellDocument` grants
+interactive shells (which also need the Session Manager plugin on the host).

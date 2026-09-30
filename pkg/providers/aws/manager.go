@@ -45,10 +45,12 @@ var (
 
 // Manager manages AWS EC2 instances and autoscaling groups.
 type Manager struct {
-	ec2 ec2API
-	ssm ssmAPI
-	asg asgAPI
-	sts stsAPI
+	ec2    ec2API
+	ssm    ssmAPI
+	asg    asgAPI
+	sts    stsAPI
+	lt     launchTemplateAPI
+	groups groupAPI
 }
 
 type ec2API interface {
@@ -81,11 +83,15 @@ type asgAPI interface {
 
 // New creates a Manager using the provided AWS configuration.
 func New(cfg aws.Config) *Manager {
+	ec2Client := ec2.NewFromConfig(cfg)
+	asgClient := autoscaling.NewFromConfig(cfg)
 	return &Manager{
-		ec2: ec2.NewFromConfig(cfg),
-		ssm: ssm.NewFromConfig(cfg),
-		asg: autoscaling.NewFromConfig(cfg),
-		sts: sts.NewFromConfig(cfg),
+		ec2:    ec2Client,
+		ssm:    ssm.NewFromConfig(cfg),
+		asg:    asgClient,
+		sts:    sts.NewFromConfig(cfg),
+		lt:     ec2Client,
+		groups: asgClient,
 	}
 }
 

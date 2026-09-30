@@ -15,7 +15,7 @@ type stsAPI interface {
 
 // AccountID returns the AWS account of the current credentials.
 // GetCallerIdentity needs no IAM permission. Teardown compares it with the
-// account recorded at creation before trusting an InvalidInstanceID.NotFound.
+// account recorded at creation before trusting any "not found" answer.
 func (m *Manager) AccountID(ctx context.Context) (string, error) {
 	if m.sts == nil {
 		return "", errors.New("aws: sts client is nil")

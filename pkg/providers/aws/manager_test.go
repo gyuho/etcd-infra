@@ -333,30 +333,6 @@ func TestCreateBuildsRunInstancesRequest(t *testing.T) {
 	assert.Equal(t, "/tmp/key", ssh.PrivateKeyPath)
 }
 
-func TestCreateDataVolumeTerminationPolicy(t *testing.T) {
-	t.Parallel()
-
-	for _, ephemeral := range []bool{false, true} {
-		fake := &fakeEC2{
-			subnets:        []types.Subnet{{SubnetId: aws.String("subnet-a")}},
-			securityGroups: []types.SecurityGroup{{GroupId: aws.String("sg-1")}},
-		}
-		_, err := newWithEC2(fake).Create(context.Background(), compute.NewCreateRequest(
-			compute.WithVPCID("vpc-1"),
-			compute.WithName("node-1"),
-			compute.WithImage("ami-1"),
-			compute.WithSize("t3.micro"),
-			compute.WithProviderConfig(CreateConfig{DataVolumeSizeGB: 8, DataVolumeDeleteOnTermination: ephemeral}),
-		))
-		require.NoError(t, err)
-		require.Len(t, fake.runInput.BlockDeviceMappings, 1)
-		ebs := fake.runInput.BlockDeviceMappings[0].Ebs
-		// Replaceable members keep their volume; ephemeral hosts must not leak it.
-		assert.Equal(t, ephemeral, aws.ToBool(ebs.DeleteOnTermination))
-		assert.Equal(t, int32(8), aws.ToInt32(ebs.VolumeSize))
-	}
-}
-
 func TestInstanceNotFoundSemantics(t *testing.T) {
 	t.Parallel()
 

@@ -143,16 +143,15 @@ func (m *Manager) buildRunInstancesInput(ctx context.Context, op compute.Op) (*e
 			input.PrivateIpAddress = aws.String(cfg.PrivateIPAddress)
 		}
 		if cfg.DataVolumeSizeGB > 0 && cfg.DataVolumeID == "" {
-			// A dedicated data volume. By default it survives termination:
-			// replacement reattaches it instead of losing /var/lib/etcd with
-			// the root volume. Ephemeral hosts opt into deletion with the
-			// instance.
+			// A dedicated data volume that survives termination: replacement
+			// reattaches it instead of losing /var/lib/etcd with the root
+			// volume.
 			input.BlockDeviceMappings = append(input.BlockDeviceMappings, types.BlockDeviceMapping{
 				DeviceName: aws.String(dataVolumeDeviceName),
 				Ebs: &types.EbsBlockDevice{
 					VolumeType:          types.VolumeTypeGp3,
 					VolumeSize:          aws.Int32(int32(cfg.DataVolumeSizeGB)), //nolint:gosec // bounded by flag validation
-					DeleteOnTermination: aws.Bool(cfg.DataVolumeDeleteOnTermination),
+					DeleteOnTermination: aws.Bool(false),
 				},
 			})
 		}

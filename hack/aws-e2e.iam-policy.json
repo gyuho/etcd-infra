@@ -7,7 +7,13 @@
       "Action": [
         "ec2:DescribeInstances",
         "ec2:DescribeSubnets",
-        "ec2:DescribeSecurityGroups"
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions",
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeAutoScalingInstances",
+        "autoscaling:DescribeScalingActivities"
       ],
       "Resource": "*"
     },
@@ -38,6 +44,89 @@
         "arn:aws:ec2:*:*:security-group/*",
         "arn:aws:ec2:*::image/*"
       ]
+    },
+    {
+      "Sid": "EC2RunInstancesFromTaggedLaunchTemplates",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:launch-template/*",
+      "Condition": {
+        "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2CreateTaggedLaunchTemplates",
+      "Effect": "Allow",
+      "Action": "ec2:CreateLaunchTemplate",
+      "Resource": "arn:aws:ec2:*:*:launch-template/*",
+      "Condition": {
+        "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2TagLaunchTemplatesOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:*:*:launch-template/*",
+      "Condition": {
+        "StringEquals": { "ec2:CreateAction": "CreateLaunchTemplate" }
+      }
+    },
+    {
+      "Sid": "EC2DeleteTaggedLaunchTemplates",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteLaunchTemplate",
+      "Resource": "arn:aws:ec2:*:*:launch-template/*",
+      "Condition": {
+        "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "AutoScalingCreateTaggedGroupsPinnedVersion",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:CreateOrUpdateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Null": { "aws:RequestTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "AutoScalingRequirePinnedLaunchTemplateVersion",
+      "Effect": "Deny",
+      "Action": [
+        "autoscaling:CreateAutoScalingGroup",
+        "autoscaling:UpdateAutoScalingGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": { "autoscaling:LaunchTemplateVersionSpecified": "false" }
+      }
+    },
+    {
+      "Sid": "AutoScalingManageTaggedGroups",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:UpdateAutoScalingGroup",
+        "autoscaling:DeleteAutoScalingGroup",
+        "autoscaling:SuspendProcesses",
+        "autoscaling:TerminateInstanceInAutoScalingGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "AutoScalingServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*",
+      "Condition": {
+        "StringLike": { "iam:AWSServiceName": "autoscaling.amazonaws.com" }
+      }
     },
     {
       "Sid": "EC2TagOnCreateOnly",

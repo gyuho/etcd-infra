@@ -63,7 +63,7 @@ func runAWSDrive(ctx context.Context, args []string) error {
 		return err
 	}
 	if state.Dev != nil {
-		return fmt.Errorf("%s is a dev box; use 'etcd-infra aws dev run --name %s'", *name, *name)
+		return fmt.Errorf("%s is a dev group; use 'etcd-infra aws dev run --name %s'", *name, *name)
 	}
 	if len(state.StressClients) == 0 {
 		return fmt.Errorf("cluster %s has no stress clients; recreate it with 'etcd-infra aws up --stress-clients 1'", *name)
