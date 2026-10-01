@@ -44,6 +44,12 @@ type Result struct {
 	// Data transfer metrics
 	BytesWritten int64 `json:"bytesWritten"`
 	BytesRead    int64 `json:"bytesRead"`
+
+	// Open-loop scenarios: arrivals dropped because every in-flight slot was
+	// busy, per-class results, and the maintenance operations performed.
+	MissedArrivals int64              `json:"missedArrivals,omitempty" yaml:"missedArrivals,omitempty"`
+	Classes        []ClassResult      `json:"classes,omitempty"        yaml:"classes,omitempty"`
+	Maintenance    []MaintenanceEvent `json:"maintenance,omitempty"    yaml:"maintenance,omitempty"`
 }
 
 // RecordTimeEnd mirrors the conformance helper for computing duration and RPS.

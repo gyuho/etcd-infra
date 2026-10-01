@@ -81,4 +81,8 @@ const (
 	// K8sJobStorm: the AI/ML gang-scheduling signature — a burst of pod
 	// creates and deletes with no pacing, with informer watches.
 	K8sJobStorm
+	// K8sMixedSizeMaintenance staging/src/k8s.io/apiserver/pkg/storage/etcd3/compact.go + store.go
+	// Open-loop mix of small leases/events and large pods/CRDs over a preloaded
+	// keyspace while the apiserver compacts and operators defragment.
+	K8sMixedSizeMaintenance
 )

@@ -28,6 +28,7 @@ var StressIDStringToID = map[string]StressID{
 	"K8S_MIXED_APISERVER":        K8sMixedApiserver,
 	"K8S_CRD_HEAVY_CHURN":        K8sCRDHeavyChurn,
 	"K8S_JOB_STORM":              K8sJobStorm,
+	"K8S_MIXED_SIZE_MAINTENANCE": K8sMixedSizeMaintenance,
 }
 
 // StressIDStringToRunnerFunc maps workload IDs to runner functions.
@@ -58,6 +59,7 @@ var StressIDStringToRunnerFunc = map[string]func(r StressRunner){
 	"K8S_MIXED_APISERVER":        RunK8sMixedApiserver,
 	"K8S_CRD_HEAVY_CHURN":        RunK8sCRDHeavyChurn,
 	"K8S_JOB_STORM":              RunK8sJobStorm,
+	"K8S_MIXED_SIZE_MAINTENANCE": RunK8sMixedSizeMaintenance,
 }
 
 // StressIDToRunner maps StressID to the concrete runner.

@@ -112,12 +112,20 @@ func runStress(args []string) error {
 	duration := flags.Int("duration", 60, "duration in seconds")
 	workers := flags.Int("workers", 10, "concurrent workers")
 	rps := flags.Int("rps", 100, "requests per second; 0 is unlimited")
+	keyBytes := flags.Int("key-bytes", 0, "key size override in bytes; 0 keeps each scenario's default")
+	valueBytes := flags.Int("value-bytes", 0, "value size override in bytes; 0 keeps each scenario's Kubernetes-shaped default")
+	compactInterval := flags.Int("compact-interval", 0, "seconds between apiserver-style compactions in maintenance-aware scenarios; 0 disables")
+	defrag := flags.Bool("defrag-after-compact", false, "defragment every member (followers first) after each compaction; needs --compact-interval")
+	keyspaceScale := flags.Float64("keyspace-scale", 0, "multiplier for retained objects per resource type in Kubernetes-shaped scenarios; 0 means 1")
 	resultsFile := flags.String("results-file", "", "append per-scenario results as JSON lines to this file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *duration < 1 || *workers < 1 || *rps < 0 {
 		return errors.New("duration and workers must be positive; rps must be non-negative")
+	}
+	if *keyBytes < 0 || *valueBytes < 0 || *compactInterval < 0 || *keyspaceScale < 0 {
+		return errors.New("key-bytes, value-bytes, compact-interval, and keyspace-scale must be non-negative")
 	}
 
 	return stress.Run(stress.Options{
@@ -131,7 +139,13 @@ func runStress(args []string) error {
 		Duration:       *duration,
 		Workers:        *workers,
 		RequestsPerSec: *rps,
-		ResultsFile:    *resultsFile,
+		KeyBytes:       *keyBytes,
+		ValueBytes:     *valueBytes,
+
+		CompactInterval:    *compactInterval,
+		DefragAfterCompact: *defrag,
+		KeyspaceScale:      *keyspaceScale,
+		ResultsFile:        *resultsFile,
 	})
 }
 

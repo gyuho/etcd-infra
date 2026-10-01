@@ -1,4 +1,4 @@
-// Package scenarios defines the etcd stress scenario catalog (21 workloads) and workload generators.
+// Package scenarios defines the etcd stress scenario catalog and workload generators.
 //
 // WHY NAME: "scenarios" holds workload type definitions, ID enums, and generator
 // functions, not the orchestration engine that dispatches them.

@@ -98,4 +98,14 @@ type StressConfig struct {
 	RequestsPerSecond int
 	KeySizeBytes      int
 	ValueSizeBytes    int
+	// CompactIntervalSeconds, when positive, makes maintenance-aware scenarios
+	// compact on the kube-apiserver schedule: every interval, to the revision
+	// observed one interval earlier. Zero disables compaction.
+	CompactIntervalSeconds int
+	// DefragAfterCompact defragments every member (followers first, leader
+	// last) after each compaction, as operators do to reclaim space.
+	DefragAfterCompact bool
+	// KeyspaceScale multiplies the number of retained objects per resource
+	// type in Kubernetes-shaped scenarios; zero means 1.
+	KeyspaceScale float64
 }

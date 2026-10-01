@@ -43,8 +43,8 @@ func RunSustainedLoad(runner StressRunner) {
 	generator := NewLoadGeneratorWithSizes(
 		cfg.DurationSeconds,
 		rps,
-		cfg.KeySizeBytes,
-		cfg.ValueSizeBytes,
+		keySize(cfg, 64),
+		valueSize(cfg, 256),
 	)
 
 	errors := runPutWorkerPool(runner, cli, metrics, generator, workerCount(cfg))

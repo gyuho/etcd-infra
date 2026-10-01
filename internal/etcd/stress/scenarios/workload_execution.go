@@ -61,7 +61,7 @@ func runPutWorkerPool(runner StressRunner, cli *clientv3.Client, metrics *Metric
 			key := runner.GenerateRandomKey(10)
 			value := req.Value
 			if value == "" {
-				value = randutil.StringAlphabetsLowerCase(cfg.ValueSizeBytes)
+				value = randutil.StringAlphabetsLowerCase(valueSize(cfg, 256))
 			}
 
 			if err := performPutWithMetrics(runner, cli, metrics, key, value, workerID); err != nil {

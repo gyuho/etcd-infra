@@ -28,6 +28,21 @@ SHA-256 checksum, and installs `etcd`, `etcdctl`, and `etcdutl`.
 Use `--members 1` for a single-member cluster. Client ports start at 2379 and
 increment once per member; override the first one with `--port`.
 
+Storage-engine comparisons use the open-loop Kubernetes size mix, which
+compacts on the apiserver schedule and defragments every member:
+
+```bash
+./bin/etcd-infra stress --scenario K8S_MIXED_SIZE_MAINTENANCE --duration 120 --rps 1000 \
+  --value-bytes 30000 --keyspace-scale 6 --compact-interval 10 --defrag-after-compact \
+  --results-file results.jsonl
+```
+
+`--value-bytes` sets the pod size under test; leases, events, configmaps and
+CRDs keep their own sizes. Without `--value-bytes`, every scenario uses its own
+Kubernetes-shaped value size. The run fails on any missed arrival (all
+in-flight slots busy), failed request, maintenance error, or per-class p99
+above 1 s; per-class results and the maintenance log go to `--results-file`.
+
 `local replace` removes and recreates the selected container with the same
 container-network IP and named data volume. Its default three-second downtime
 forces a three-member cluster to elect a new leader; pass the same `--members`

@@ -44,8 +44,8 @@ func RunConcurrentPuts(runner StressRunner) {
 	generator := NewLoadGeneratorWithSizes(
 		config.DurationSeconds,
 		config.RequestsPerSecond,
-		config.KeySizeBytes,
-		config.ValueSizeBytes,
+		keySize(config, 64),
+		valueSize(config, 256),
 	)
 
 	logutil.S().Infow("starting concurrent workers",

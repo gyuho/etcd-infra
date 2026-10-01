@@ -42,6 +42,15 @@ type Options struct {
 	Duration       int
 	Workers        int
 	RequestsPerSec int
+	// KeyBytes and ValueBytes override each scenario's own key and value
+	// sizes; zero keeps the scenario's Kubernetes-shaped default.
+	KeyBytes   int
+	ValueBytes int
+	// CompactInterval, DefragAfterCompact, and KeyspaceScale configure the
+	// maintenance-aware Kubernetes scenarios (see scenarios.StressConfig).
+	CompactInterval    int
+	DefragAfterCompact bool
+	KeyspaceScale      float64
 	// ResultsFile, when set, receives one JSON object per scenario result
 	// (appended), so drivers on remote hosts can upload machine-readable
 	// results for aggregation.
@@ -63,6 +72,12 @@ func Run(opts Options) error {
 		DurationSeconds:   opts.Duration,
 		ConcurrentWorkers: opts.Workers,
 		RequestsPerSecond: opts.RequestsPerSec,
+		KeySizeBytes:      opts.KeyBytes,
+		ValueSizeBytes:    opts.ValueBytes,
+
+		CompactIntervalSeconds: opts.CompactInterval,
+		DefragAfterCompact:     opts.DefragAfterCompact,
+		KeyspaceScale:          opts.KeyspaceScale,
 	}
 	cfg.stepTimeout = strings.TrimSpace(opts.StepTimeout)
 
@@ -310,6 +325,10 @@ func (r *stressRunner) GetConfig() scenarios.StressConfig {
 		RequestsPerSecond: r.cfg.RequestsPerSecond,
 		KeySizeBytes:      r.cfg.KeySizeBytes,
 		ValueSizeBytes:    r.cfg.ValueSizeBytes,
+
+		CompactIntervalSeconds: r.cfg.CompactIntervalSeconds,
+		DefragAfterCompact:     r.cfg.DefragAfterCompact,
+		KeyspaceScale:          r.cfg.KeyspaceScale,
 	}
 }
 

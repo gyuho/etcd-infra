@@ -77,8 +77,9 @@ func TestConfigValidateAndSetDefaultsAppliesDefaults(t *testing.T) {
 
 	assert.Equal(t, 60, cfg.DurationSeconds)
 	assert.Equal(t, 10, cfg.ConcurrentWorkers)
-	assert.Equal(t, 64, cfg.KeySizeBytes)
-	assert.Equal(t, 256, cfg.ValueSizeBytes)
+	// Unset sizes stay zero so each scenario keeps its own Kubernetes shape.
+	assert.Zero(t, cfg.KeySizeBytes)
+	assert.Zero(t, cfg.ValueSizeBytes)
 	assert.InDelta(t, 0.5, cfg.MaxErrorRate, 0.001)
 	assert.Equal(t, 30000, cfg.MaxLatencyMs)
 }

@@ -21,6 +21,10 @@ var (
 	errNoTestKeyPrefix = errors.New("no test key prefix specified")
 	errNoScenarios     = errors.New("no scenarios specified")
 	errUnknownScenario = errors.New("unknown scenario")
+	errNegativeSize    = errors.New("key and value sizes must not be negative")
+
+	errNegativeMaintenance  = errors.New("compact interval and keyspace scale must not be negative")
+	errDefragWithoutCompact = errors.New("defrag after compact requires a positive compact interval")
 )
 
 // Config defines stress testing configuration.
@@ -46,6 +50,11 @@ type Config struct {
 	// Data sizes with explicit units
 	KeySizeBytes   int `json:"key_size_bytes"   yaml:"key_size_bytes"`
 	ValueSizeBytes int `json:"value_size_bytes" yaml:"value_size_bytes"`
+
+	// Maintenance and keyspace for Kubernetes-shaped scenarios
+	CompactIntervalSeconds int     `json:"compact_interval_seconds" yaml:"compact_interval_seconds"`
+	DefragAfterCompact     bool    `json:"defrag_after_compact"     yaml:"defrag_after_compact"`
+	KeyspaceScale          float64 `json:"keyspace_scale"           yaml:"keyspace_scale"`
 
 	// Safety limits
 	MaxErrorRate float64 `json:"max_error_rate" yaml:"max_error_rate"`
@@ -85,11 +94,17 @@ func (cfg *Config) ValidateAndSetDefaults() error {
 	if cfg.ConcurrentWorkers <= 0 {
 		cfg.ConcurrentWorkers = 10
 	}
-	if cfg.KeySizeBytes <= 0 {
-		cfg.KeySizeBytes = 64
+	// KeySizeBytes and ValueSizeBytes stay zero unless set: each scenario
+	// then uses its own Kubernetes-shaped size (3 KiB pods, 64 KiB CRDs, ...).
+	// A global default here would silently override those shapes.
+	if cfg.KeySizeBytes < 0 || cfg.ValueSizeBytes < 0 {
+		return errNegativeSize
 	}
-	if cfg.ValueSizeBytes <= 0 {
-		cfg.ValueSizeBytes = 256
+	if cfg.CompactIntervalSeconds < 0 || cfg.KeyspaceScale < 0 {
+		return errNegativeMaintenance
+	}
+	if cfg.DefragAfterCompact && cfg.CompactIntervalSeconds == 0 {
+		return errDefragWithoutCompact
 	}
 	if cfg.MaxErrorRate <= 0 {
 		cfg.MaxErrorRate = 0.5
