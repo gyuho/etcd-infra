@@ -470,3 +470,34 @@ version (`autoscaling:LaunchTemplateVersionSpecified`);
 `AWSServiceRoleForAutoScaling`. `SSMReadUbuntuAMIParameters` grants the AMI
 lookup (not needed with `--ami`), and `SSMStartSessionShellDocument` grants
 interactive shells (which also need the Session Manager plugin on the host).
+
+### Single-member etcd on a dev box (fork binaries)
+
+`aws dev etcd` turns every in-service box (or the `--instance` list) into an
+independent single-member etcd: member name = instance ID, data under
+`<mount-point>/etcd` on the EBS volume, client URL `http://<private-ip>:2379`,
+systemd unit `etcd-infra.service`. Build the fork for Linux; a macOS or
+wrong-architecture build is rejected before upload.
+
+```bash
+# in the etcd fork
+GOOS=linux GOARCH=amd64 make build
+
+./bin/etcd-infra aws dev up --name dev01 --dry-run=false        # --count 1 by default
+./bin/etcd-infra aws dev etcd --name dev01 --binary ~/etcd/bin/etcd --etcdctl ~/etcd/bin/etcdctl
+./bin/etcd-infra aws dev run --name dev01 -- etcdctl endpoint status -w table
+./bin/etcd-infra aws dev etcd --name dev01 --binary ~/etcd/bin/etcd --reset-data   # rebuilt binary, fresh data
+./bin/etcd-infra aws dev down --name dev01
+```
+
+`--binary`/`--etcdctl` are uploaded to
+`s3://<bucket>/etcd-infra/dev/<name>/bin/<sha256-prefix>/` with the host AWS
+CLI and downloaded and checksum-verified on the box with its instance role.
+Without `--binary`, `--version` (default latest) installs the release
+tarball's `etcd`, `etcdctl`, and `etcdutl`. `--extra-args`,
+`--extra-args-file` (default `$ETCD_INFRA_EXTRA_ARGS_FILE`), and `--env`
+work as in `aws up`. Every rerun reinstalls, rewrites the unit, and restarts;
+data is kept unless `--reset-data` is given. It returns once
+`/health` passes on each box and prints one `instance=<id>
+client_url=... data_dir=... etcd_version=...` line per box; on failure it
+shows the unit status and journal tail.

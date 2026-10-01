@@ -25,6 +25,7 @@ package main
 //	    --bucket etcd-infra-e2e-... --dry-run=false
 //	etcd-infra aws dev run --name dev01 -- uname -a            # every box
 //	etcd-infra aws dev run --name dev01 --instance i-0abc --script ./test.sh
+//	etcd-infra aws dev etcd --name dev01 --binary ./bin/etcd   # single-member etcd per box
 //	etcd-infra aws dev scale --name dev01 --count 5
 //	etcd-infra aws dev status --name dev01
 //	etcd-infra aws dev down --name dev01
@@ -129,7 +130,7 @@ type awsDevUpOptions struct {
 }
 
 func runAWSDev(ctx context.Context, args []string) error {
-	const usage = "usage: etcd-infra aws dev <up|run|scale|status|down>"
+	const usage = "usage: etcd-infra aws dev <up|run|etcd|scale|status|down>"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -138,6 +139,8 @@ func runAWSDev(ctx context.Context, args []string) error {
 		return runAWSDevUp(ctx, args[1:])
 	case "run":
 		return runAWSDevRun(ctx, args[1:])
+	case "etcd":
+		return runAWSDevEtcd(ctx, args[1:])
 	case "scale":
 		return runAWSDevScale(ctx, args[1:])
 	case "status":
@@ -1015,7 +1018,7 @@ func printAWSDevStatus(ctx context.Context, manager *awsprovider.Manager, stateP
 		fmt.Printf("instance=%s lifecycle=%s health=%s az=%s private_ipv4=%s results_uri=%s%s/\n",
 			member.ID, member.LifecycleState, member.HealthStatus, member.AvailabilityZone, ip, dev.ResultsURI, member.ID)
 	}
-	fmt.Fprintf(os.Stderr, "next:\n  etcd-infra aws dev run --name %[1]s [--instance ID] -- <command>\n  aws ssm start-session --region %[2]s --target <instance-id>\n  etcd-infra aws dev scale --name %[1]s --count N\n  etcd-infra aws dev down --name %[1]s\n",
+	fmt.Fprintf(os.Stderr, "next:\n  etcd-infra aws dev run --name %[1]s [--instance ID] -- <command>\n  etcd-infra aws dev etcd --name %[1]s [--instance ID] [--binary ./bin/etcd]\n  aws ssm start-session --region %[2]s --target <instance-id>\n  etcd-infra aws dev scale --name %[1]s --count N\n  etcd-infra aws dev down --name %[1]s\n",
 		state.Name, state.Region)
 	return nil
 }

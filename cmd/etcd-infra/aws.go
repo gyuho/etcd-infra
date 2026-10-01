@@ -626,35 +626,6 @@ func awsBootstrapScript(member clusterMember, members []clusterMember, token str
 		opts.ExtraArgs...,
 	))
 
-	var install string
-	if opts.BinaryURL != "" {
-		// Custom binary (for example a gofail-enabled fork build): download and
-		// verify it like the release artifacts. Only the etcd binary is
-		// installed; etcdctl/etcdutl are not part of a custom build.
-		install = fmt.Sprintf(`binary=%s
-binary_sha256=%s
-curl -fsSL "$binary" -o "$tmp/etcd"
-echo "$binary_sha256  $tmp/etcd" > "$tmp/checksum"
-(cd "$tmp" && sha256sum -c checksum)
-install -m 0755 "$tmp/etcd" /usr/local/bin/etcd`,
-			shell.Quote(opts.BinaryURL), shell.Quote(opts.BinarySHA256))
-	} else {
-		tag := releaseTag(opts.Version)
-		archive := fmt.Sprintf("etcd-%s-linux-%s.tar.gz", tag, opts.Arch)
-		releaseURL := "https://github.com/etcd-io/etcd/releases/download/" + tag
-		install = fmt.Sprintf(`archive=%s
-release_url=%s
-curl -fsSL "$release_url/$archive" -o "$tmp/$archive"
-curl -fsSL "$release_url/SHA256SUMS" -o "$tmp/SHA256SUMS"
-grep -E "[[:space:]]+$archive$" "$tmp/SHA256SUMS" > "$tmp/checksum"
-(cd "$tmp" && sha256sum -c checksum)
-tar -xzf "$tmp/$archive" -C "$tmp"
-install -m 0755 "$tmp/${archive%%.tar.gz}/etcd" /usr/local/bin/etcd
-install -m 0755 "$tmp/${archive%%.tar.gz}/etcdctl" /usr/local/bin/etcdctl
-install -m 0755 "$tmp/${archive%%.tar.gz}/etcdutl" /usr/local/bin/etcdutl`,
-			shell.Quote(archive), shell.Quote(releaseURL))
-	}
-
 	var volumeSetup string
 	if opts.DataVolumeSetup {
 		volumeSetup = awsDataVolumeSetupScript("/var/lib/etcd") + "\n"
@@ -665,7 +636,46 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 %s%s
 install -d -m 0700 /var/lib/etcd
-cat > /etc/systemd/system/etcd-infra.service <<'EOF'
+%ssystemctl enable --now etcd-infra.service
+`, volumeSetup, awsEtcdInstallScript(opts), awsEtcdUnitScript(opts.Env, execStart))
+}
+
+// awsEtcdInstallScript downloads, verifies, and installs etcd into
+// /usr/local/bin: the custom binary at BinaryURL, or the release tarball's
+// etcd, etcdctl, and etcdutl. It expects $tmp to be a scratch directory.
+func awsEtcdInstallScript(opts awsBootstrapOptions) string {
+	if opts.BinaryURL != "" {
+		// Custom binary (for example a gofail-enabled fork build): download and
+		// verify it like the release artifacts. Only the etcd binary is
+		// installed; etcdctl/etcdutl are not part of a custom build.
+		return fmt.Sprintf(`binary=%s
+binary_sha256=%s
+curl -fsSL "$binary" -o "$tmp/etcd"
+echo "$binary_sha256  $tmp/etcd" > "$tmp/checksum"
+(cd "$tmp" && sha256sum -c checksum)
+install -m 0755 "$tmp/etcd" /usr/local/bin/etcd`,
+			shell.Quote(opts.BinaryURL), shell.Quote(opts.BinarySHA256))
+	}
+	tag := releaseTag(opts.Version)
+	archive := fmt.Sprintf("etcd-%s-linux-%s.tar.gz", tag, opts.Arch)
+	releaseURL := "https://github.com/etcd-io/etcd/releases/download/" + tag
+	return fmt.Sprintf(`archive=%s
+release_url=%s
+curl -fsSL "$release_url/$archive" -o "$tmp/$archive"
+curl -fsSL "$release_url/SHA256SUMS" -o "$tmp/SHA256SUMS"
+grep -E "[[:space:]]+$archive$" "$tmp/SHA256SUMS" > "$tmp/checksum"
+(cd "$tmp" && sha256sum -c checksum)
+tar -xzf "$tmp/$archive" -C "$tmp"
+install -m 0755 "$tmp/${archive%%.tar.gz}/etcd" /usr/local/bin/etcd
+install -m 0755 "$tmp/${archive%%.tar.gz}/etcdctl" /usr/local/bin/etcdctl
+install -m 0755 "$tmp/${archive%%.tar.gz}/etcdutl" /usr/local/bin/etcdutl`,
+		shell.Quote(archive), shell.Quote(releaseURL))
+}
+
+// awsEtcdUnitScript writes the etcd-infra.service unit running execStart
+// with env and reloads systemd; starting it is left to the caller.
+func awsEtcdUnitScript(env []string, execStart string) string {
+	return fmt.Sprintf(`cat > /etc/systemd/system/etcd-infra.service <<'EOF'
 [Unit]
 Description=etcd test cluster member
 After=network-online.target
@@ -682,8 +692,7 @@ LimitNOFILE=40000
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now etcd-infra.service
-`, volumeSetup, install, awsSystemdEnvironment(opts.Env), execStart)
+`, awsSystemdEnvironment(env), execStart)
 }
 
 // awsDataVolumeSetupScript mounts the dedicated EBS data volume at

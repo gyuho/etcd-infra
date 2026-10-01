@@ -122,6 +122,7 @@ func TestAWSDevCommandsRefuseClusterState(t *testing.T) {
 		{"status", "--name", "prod"},
 		{"scale", "--name", "prod", "--count", "2"},
 		{"run", "--name", "prod", "--", "true"},
+		{"etcd", "--name", "prod", "--version", "v3.6.0"},
 	} {
 		require.ErrorContains(t, runAWSDev(context.Background(), args), "not a dev group", args[0])
 	}
