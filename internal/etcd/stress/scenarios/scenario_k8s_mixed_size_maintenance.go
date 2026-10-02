@@ -425,6 +425,7 @@ func runK8sMaintenance(ctx context.Context, cli *clientv3.Client, cfg StressConf
 	}
 	interval := time.Duration(cfg.CompactIntervalSeconds) * time.Second
 	var events []MaintenanceEvent
+	var compacted int64
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -433,8 +434,11 @@ func runK8sMaintenance(ctx context.Context, cli *clientv3.Client, cfg StressConf
 			return events
 		case <-ticker.C:
 		}
+		// A cycle (compaction plus defrags) can outlast the interval, so the
+		// target one interval back may not have advanced past the last
+		// compaction; the apiserver compactor likewise only moves forward.
 		rev := target(time.Now().Add(-interval))
-		if rev == 0 {
+		if rev <= compacted {
 			continue
 		}
 		t0 := time.Now()
@@ -442,6 +446,9 @@ func runK8sMaintenance(ctx context.Context, cli *clientv3.Client, cfg StressConf
 		// Physical, so the following defrag reclaims the compacted revisions.
 		_, err := cli.Compact(cctx, rev, clientv3.WithCompactPhysical())
 		cancel()
+		if err == nil {
+			compacted = rev
+		}
 		events = append(events, maintenanceEvent("compaction", "", rev, start, t0, err))
 		if !cfg.DefragAfterCompact {
 			continue
