@@ -96,7 +96,10 @@ type awsDevState struct {
 	InstanceType     string   `json:"instanceType"`
 	MountPoint       string   `json:"mountPoint"`
 	VolumeSizeGB     int      `json:"volumeSizeGB"`
-	Bucket           string   `json:"bucket"`
+	// VolumeIOPS and VolumeThroughputMiBps are zero for the gp3 baseline.
+	VolumeIOPS            int    `json:"volumeIOPS,omitempty"`
+	VolumeThroughputMiBps int    `json:"volumeThroughputMiBps,omitempty"`
+	Bucket                string `json:"bucket"`
 	// ResultsURI is the group's S3 prefix; each box writes under
 	// <ResultsURI><instance-id>/, exported as $ETCD_INFRA_DEV_RESULTS.
 	ResultsURI string `json:"resultsURI"`
@@ -123,6 +126,8 @@ type awsDevUpOptions struct {
 	InstanceType       string
 	IAMInstanceProfile string
 	VolumeSizeGB       int
+	VolumeIOPS         int
+	VolumeThroughput   int
 	MountPoint         string
 	Bucket             string
 	Count              int
@@ -172,6 +177,8 @@ func runAWSDevUp(ctx context.Context, args []string) error {
 	flags.StringVar(&opts.InstanceType, "instance-type", "", "EC2 instance type (default: t3a.medium for amd64, t4g.medium for arm64)")
 	flags.StringVar(&opts.IAMInstanceProfile, "instance-profile", os.Getenv("ETCD_INFRA_AWS_INSTANCE_PROFILE"), "IAM instance profile with SSM core and S3 write on --bucket (default: $ETCD_INFRA_AWS_INSTANCE_PROFILE; required)")
 	flags.IntVar(&opts.VolumeSizeGB, "volume-size-gb", defaultAWSDevVolumeSizeGB, "data volume size in GiB")
+	flags.IntVar(&opts.VolumeIOPS, "volume-iops", 0, "provisioned gp3 IOPS for the data volume (0: gp3 baseline 3000)")
+	flags.IntVar(&opts.VolumeThroughput, "volume-throughput", 0, "provisioned gp3 throughput in MiB/s for the data volume (0: gp3 baseline 125)")
 	flags.StringVar(&opts.MountPoint, "mount-point", defaultAWSDevMountPoint, "absolute path where the data volume is mounted")
 	flags.StringVar(&opts.Bucket, "bucket", os.Getenv("ETCD_INFRA_AWS_S3_BUCKET"), "S3 bucket for results (default: $ETCD_INFRA_AWS_S3_BUCKET; required)")
 	flags.BoolVar(&opts.DryRun, "dry-run", true, "show the plan without creating AWS resources")
@@ -246,20 +253,22 @@ func runAWSDevUp(ctx context.Context, args []string) error {
 		Region: opts.Region,
 		Arch:   opts.Arch,
 		Dev: &awsDevState{
-			AccountID:        accountID,
-			VPCID:            opts.VPCID,
-			SubnetIDs:        opts.SubnetIDs,
-			SecurityGroupIDs: opts.SecurityGroupIDs,
-			AMI:              opts.AMI,
-			InstanceType:     opts.InstanceType,
-			MountPoint:       opts.MountPoint,
-			VolumeSizeGB:     opts.VolumeSizeGB,
-			Bucket:           opts.Bucket,
-			ResultsURI:       awsDevResultsURI(opts.Bucket, opts.Name),
-			Count:            opts.Count,
-			AutoScalingGroup: opts.Name,
-			LaunchTemplate:   opts.Name,
-			OwnerToken:       ownerToken,
+			AccountID:             accountID,
+			VPCID:                 opts.VPCID,
+			SubnetIDs:             opts.SubnetIDs,
+			SecurityGroupIDs:      opts.SecurityGroupIDs,
+			AMI:                   opts.AMI,
+			InstanceType:          opts.InstanceType,
+			MountPoint:            opts.MountPoint,
+			VolumeSizeGB:          opts.VolumeSizeGB,
+			VolumeIOPS:            opts.VolumeIOPS,
+			VolumeThroughputMiBps: opts.VolumeThroughput,
+			Bucket:                opts.Bucket,
+			ResultsURI:            awsDevResultsURI(opts.Bucket, opts.Name),
+			Count:                 opts.Count,
+			AutoScalingGroup:      opts.Name,
+			LaunchTemplate:        opts.Name,
+			OwnerToken:            ownerToken,
 		},
 	}
 	if err := writeAWSState(statePath, state); err != nil {
@@ -341,16 +350,18 @@ func resolveAWSDevNetwork(ctx context.Context, manager *awsprovider.Manager, opt
 func awsDevLaunchGroupSpec(state awsState, instanceProfile string) awsprovider.LaunchGroupSpec {
 	dev := state.Dev
 	return awsprovider.LaunchGroupSpec{
-		Name:               dev.LaunchTemplate,
-		SubnetIDs:          dev.SubnetIDs,
-		SecurityGroupIDs:   dev.SecurityGroupIDs,
-		ImageID:            dev.AMI,
-		InstanceType:       dev.InstanceType,
-		IAMInstanceProfile: instanceProfile,
-		UserData:           awsDevUserData(state),
-		DataVolumeSizeGB:   int32(dev.VolumeSizeGB), //nolint:gosec // bounded by flag validation
-		Tags:               awsDevTags(state.Name, dev.OwnerToken),
-		Count:              int32(dev.Count), //nolint:gosec // bounded by flag validation
+		Name:                      dev.LaunchTemplate,
+		SubnetIDs:                 dev.SubnetIDs,
+		SecurityGroupIDs:          dev.SecurityGroupIDs,
+		ImageID:                   dev.AMI,
+		InstanceType:              dev.InstanceType,
+		IAMInstanceProfile:        instanceProfile,
+		UserData:                  awsDevUserData(state),
+		DataVolumeSizeGB:          int32(dev.VolumeSizeGB),          //nolint:gosec // bounded by flag validation
+		DataVolumeIOPS:            int32(dev.VolumeIOPS),            //nolint:gosec // bounded by flag validation
+		DataVolumeThroughputMiBps: int32(dev.VolumeThroughputMiBps), //nolint:gosec // bounded by flag validation
+		Tags:                      awsDevTags(state.Name, dev.OwnerToken),
+		Count:                     int32(dev.Count), //nolint:gosec // bounded by flag validation
 	}
 }
 
@@ -848,6 +859,14 @@ func validateAWSDevUpOptions(opts awsDevUpOptions) error {
 	if opts.VolumeSizeGB < 1 || opts.VolumeSizeGB > 16384 {
 		return fmt.Errorf("--volume-size-gb must be between 1 and 16384, got %d", opts.VolumeSizeGB)
 	}
+	// Only the gp3 baselines are checked here; EC2 enforces the upper limits
+	// and the IOPS-per-GiB and throughput-per-IOPS ratios, which AWS revises.
+	if opts.VolumeIOPS != 0 && (opts.VolumeIOPS < 3000 || opts.VolumeIOPS > 1_000_000) {
+		return fmt.Errorf("--volume-iops must be 0 or at least 3000 (gp3 baseline), got %d", opts.VolumeIOPS)
+	}
+	if opts.VolumeThroughput != 0 && (opts.VolumeThroughput < 125 || opts.VolumeThroughput > 100_000) {
+		return fmt.Errorf("--volume-throughput must be 0 or at least 125 MiB/s (gp3 baseline), got %d", opts.VolumeThroughput)
+	}
 	if !awsDevMountPointPattern.MatchString(opts.MountPoint) {
 		return fmt.Errorf("--mount-point must be an absolute path of [A-Za-z0-9._-] segments not starting with '.', got %q", opts.MountPoint)
 	}
@@ -975,7 +994,7 @@ func printAWSDevPlan(opts awsDevUpOptions, amiParameter string) {
 	fmt.Printf("AWS dev group dry run: %s\n", opts.Name)
 	fmt.Printf("  launch template + Auto Scaling group %s: %d x %s (%s), AMI %s\n", opts.Name, opts.Count, opts.InstanceType, opts.Arch, ami)
 	fmt.Printf("  network: existing VPC %s, subnets: %s (nothing is created in the VPC)\n", vpc, subnets)
-	fmt.Printf("  data volume per box: %d GiB encrypted gp3 mounted at %s (deleted with the box)\n", opts.VolumeSizeGB, opts.MountPoint)
+	fmt.Printf("  data volume per box: %d GiB encrypted gp3, %s, mounted at %s (deleted with the box)\n", opts.VolumeSizeGB, awsDevVolumePerf(opts.VolumeIOPS, opts.VolumeThroughput), opts.MountPoint)
 	fmt.Printf("  results: %s<instance-id>/\n", awsDevResultsURI(opts.Bucket, opts.Name))
 	fmt.Println("rerun with --dry-run=false to create the group")
 }
@@ -1008,6 +1027,7 @@ func printAWSDevStatus(ctx context.Context, manager *awsprovider.Manager, stateP
 	fmt.Printf("count=%d\n", dev.Count)
 	fmt.Printf("mount_point=%s\n", dev.MountPoint)
 	fmt.Printf("volume_size_gb=%d\n", dev.VolumeSizeGB)
+	fmt.Printf("volume_performance=%s\n", awsDevVolumePerf(dev.VolumeIOPS, dev.VolumeThroughputMiBps))
 	fmt.Printf("results_uri=%s\n", dev.ResultsURI)
 	fmt.Printf("state_file=%s\n", statePath)
 	for _, member := range members {
@@ -1021,4 +1041,16 @@ func printAWSDevStatus(ctx context.Context, manager *awsprovider.Manager, stateP
 	fmt.Fprintf(os.Stderr, "next:\n  etcd-infra aws dev run --name %[1]s [--instance ID] -- <command>\n  etcd-infra aws dev etcd --name %[1]s [--instance ID] [--binary ./bin/etcd]\n  aws ssm start-session --region %[2]s --target <instance-id>\n  etcd-infra aws dev scale --name %[1]s --count N\n  etcd-infra aws dev down --name %[1]s\n",
 		state.Name, state.Region)
 	return nil
+}
+
+// awsDevVolumePerf describes the data volume's provisioned performance.
+func awsDevVolumePerf(iops, throughput int) string {
+	i, t := "3000 IOPS (baseline)", "125 MiB/s (baseline)"
+	if iops > 0 {
+		i = fmt.Sprintf("%d IOPS", iops)
+	}
+	if throughput > 0 {
+		t = fmt.Sprintf("%d MiB/s", throughput)
+	}
+	return i + ", " + t
 }

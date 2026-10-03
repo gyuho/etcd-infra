@@ -408,7 +408,9 @@ uses template version 1 explicitly, never `$Latest`):
 
 - `--instance-type` (default t3a.medium, or t4g.medium with `--arch arm64`),
   the pinned AMI, IMDSv2 required (hop limit 2 so containers can use it).
-- An encrypted gp3 data volume (`--volume-size-gb`, default 32) that EC2
+- An encrypted gp3 data volume (`--volume-size-gb`, default 32; provisioned
+  performance with `--volume-iops` and `--volume-throughput` in MiB/s, default
+  the gp3 baseline of 3000 IOPS and 125 MiB/s) that EC2
   deletes with its instance, formatted and mounted at `--mount-point`
   (default `/mnt/data`; allowed: `/data`, `/var/lib/etcd`, or under `/mnt/`,
   `/data/`, `/srv/`, so it can never hide OS state) with an fstab entry, so it

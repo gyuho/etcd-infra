@@ -167,9 +167,22 @@
       }
     },
     {
-      "Sid": "EC2DescribeVolumes",
+      "Sid": "EC2ModifyTaggedVolumes",
       "Effect": "Allow",
-      "Action": "ec2:DescribeVolumes",
+      "Action": "ec2:ModifyVolume",
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+                "Null": { "aws:ResourceTag/etcd-infra.cluster": "false" }
+      }
+    },
+    {
+      "Sid": "EC2DescribeVolumesAndTypes",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVolumesModifications",
+        "ec2:DescribeInstanceTypes"
+      ],
       "Resource": "*"
     },
     {

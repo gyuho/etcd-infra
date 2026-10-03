@@ -67,6 +67,11 @@ type LaunchGroupSpec struct {
 	// DataVolumeSizeGB adds an encrypted gp3 data volume that EC2 deletes
 	// with the instance, so terminating an instance never leaks storage.
 	DataVolumeSizeGB int32
+	// DataVolumeIOPS and DataVolumeThroughputMiBps provision the gp3 data
+	// volume above its baseline (3000 IOPS, 125 MiB/s); zero keeps the
+	// baseline. EC2 rejects combinations gp3 does not support.
+	DataVolumeIOPS            int32
+	DataVolumeThroughputMiBps int32
 	// Tags go on the template, the group, and every instance and volume the
 	// group launches.
 	Tags  map[string]string
@@ -155,14 +160,21 @@ func (m *Manager) CreateLaunchTemplate(ctx context.Context, spec LaunchGroupSpec
 		data.IamInstanceProfile = &types.LaunchTemplateIamInstanceProfileSpecificationRequest{Name: aws.String(profile)}
 	}
 	if spec.DataVolumeSizeGB > 0 {
+		ebs := &types.LaunchTemplateEbsBlockDeviceRequest{
+			VolumeType:          types.VolumeTypeGp3,
+			VolumeSize:          aws.Int32(spec.DataVolumeSizeGB),
+			Encrypted:           aws.Bool(true),
+			DeleteOnTermination: aws.Bool(true),
+		}
+		if spec.DataVolumeIOPS > 0 {
+			ebs.Iops = aws.Int32(spec.DataVolumeIOPS)
+		}
+		if spec.DataVolumeThroughputMiBps > 0 {
+			ebs.Throughput = aws.Int32(spec.DataVolumeThroughputMiBps)
+		}
 		data.BlockDeviceMappings = []types.LaunchTemplateBlockDeviceMappingRequest{{
 			DeviceName: aws.String(dataVolumeDeviceName),
-			Ebs: &types.LaunchTemplateEbsBlockDeviceRequest{
-				VolumeType:          types.VolumeTypeGp3,
-				VolumeSize:          aws.Int32(spec.DataVolumeSizeGB),
-				Encrypted:           aws.Bool(true),
-				DeleteOnTermination: aws.Bool(true),
-			},
+			Ebs:        ebs,
 		}}
 	}
 	out, err := m.lt.CreateLaunchTemplate(ctx, &ec2.CreateLaunchTemplateInput{
