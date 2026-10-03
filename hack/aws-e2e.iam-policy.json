@@ -173,6 +173,16 @@
       "Resource": "*"
     },
     {
+      "Sid": "CloudWatchReadMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SSMSendCommandOnTaggedInstances",
       "Effect": "Allow",
       "Action": "ssm:SendCommand",
